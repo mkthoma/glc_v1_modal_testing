@@ -125,27 +125,33 @@ class Adapter(ChannelAdapter):
                 )
 
         # MMS: download each media item, SHA-256 hash, persist to artifact store.
+        # A failure fetching/persisting one item must not take down the whole
+        # message (network hiccups, a dead MediaUrl, a full disk, ...) — skip
+        # it and keep going, matching the adapter's never-raise contract.
         attachments: list[Attachment] = []
+        failed_media: list[dict[str, str]] = []
         for item in form.media_items():
-            if mock is not None:
-                data = mock.download(item.url)
-            else:
-                data = await self._download_media(item.url)
+            try:
+                if mock is not None:
+                    data = mock.download(item.url)
+                    # Test contract: mock keys artifacts by the full sha256 digest.
+                    sha = hashlib.sha256(data).hexdigest()
+                    ref = mock.store_artifact(sha, data)
+                else:
+                    data = await self._download_media(item.url)
+                    # Live: persist the bytes for real (fixes the discarded-bytes bug).
+                    from .artifacts import put
 
-            if mock is not None:
-                # Test contract: mock keys artifacts by the full sha256 digest.
-                sha = hashlib.sha256(data).hexdigest()
-                ref = mock.store_artifact(sha, data)
-            else:
-                # Live: persist the bytes for real (fixes the discarded-bytes bug).
-                from .artifacts import put
-
-                ref = put(
-                    data,
-                    content_type=item.content_type,
-                    source="twilio_sms",
-                    descriptor=f"MMS media from {from_phone}",
-                )
+                    ref = put(
+                        data,
+                        content_type=item.content_type,
+                        source="twilio_sms",
+                        descriptor=f"MMS media from {from_phone}",
+                    )
+            except Exception as e:
+                print(f"[twilio_sms] failed to fetch/persist media {item.url!r}: {e!r}")
+                failed_media.append({"url": item.url, "error": repr(e)})
+                continue
 
             attachments.append(
                 Attachment(kind=_media_kind(item.content_type), ref=ref, mime=item.content_type)
@@ -155,6 +161,8 @@ class Adapter(ChannelAdapter):
             "message_sid": form.MessageSid,
             "account_sid": form.AccountSid,
         }
+        if failed_media:
+            metadata["failed_media"] = failed_media
         keyword = _detect_keyword(body)
         if keyword is not None:
             # Surface opt-out/help keywords so the gateway/agent can comply.

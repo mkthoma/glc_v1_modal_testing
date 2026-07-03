@@ -206,6 +206,14 @@ curl -X POST http://localhost:8200/webhooks/twilio_sms \
   check `TWILIO_PHONE_NUMBER` is your real Twilio From.
 - **owner shows untrusted** — set `TWILIO_OWNER_NUMBER` to the exact E.164 number you text from.
 
+### Recorded demo
+
+[![Twilio SMS/MMS adapter — live WebSocket demo](https://img.youtube.com/vi/FjcsUPWP3FU/maxresdefault.jpg)](https://youtu.be/FjcsUPWP3FU)
+
+A real SMS/MMS sent from a phone, traveling the full production path above: Twilio →
+signature-verified webhook receiver → `on_message` → WebSocket round-trip to the GLC gateway
+→ `send` → reply SMS back to the sender.
+
 ## Running tests
 
 ```bash
@@ -219,9 +227,10 @@ pytest tests/channels/test_twilio_sms.py glc/channels/catalogue/twilio_sms/tests
 
 - `ruff check glc/channels/catalogue/twilio_sms/` — zero style errors
 - `mypy glc/channels/catalogue/twilio_sms/` — strict type validation passes
-- `pytest` — 54 tests total: the 7 fixed contract tests, plus dedicated modules for the
-  artifact store, live (non-mock) paths, signature verification, wire/envelope behaviors,
-  webhook routing, and the original multi-MMS scenario
+- `pytest` — 56 tests total: the 7 fixed contract tests, plus dedicated modules for the
+  artifact store, live (non-mock) paths (including non-fatal MMS download-failure handling),
+  signature verification, wire/envelope behaviors, webhook routing, and the original
+  multi-MMS scenario
 - Bidirectional translation validated: wire → canonical (`on_message`)
   and canonical → wire (`send`)
 - Mock-API smoke test runs against `tests/channels/mocks/twilio_sms_mock.py`

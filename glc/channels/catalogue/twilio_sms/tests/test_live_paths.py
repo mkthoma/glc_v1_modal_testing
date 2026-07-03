@@ -50,6 +50,66 @@ async def test_inbound_mms_persists_bytes_live(monkeypatch):
     assert artifacts.get_bytes(ref) == payload  # persisted, not discarded
 
 
+async def test_inbound_mms_download_failure_is_non_fatal(monkeypatch):
+    """A download failure (network error, 403, ...) for one media item must
+    not crash on_message — it should be skipped and recorded, not raised."""
+
+    async def fake_download(self, url):
+        raise httpx.HTTPStatusError("403 Forbidden", request=None, response=None)
+
+    monkeypatch.setattr(Adapter, "_download_media", fake_download)
+
+    adapter = Adapter(config={"phone_number": BOT_PHONE})
+    raw = {
+        "From": OWNER_ID,
+        "To": BOT_PHONE,
+        "Body": "photo",
+        "MessageSid": "MM2",
+        "NumMedia": "1",
+        "MediaUrl0": "https://example.com/blocked.jpg",
+        "MediaContentType0": "image/jpeg",
+    }
+    msg = await adapter.on_message(raw)  # must not raise
+
+    assert msg.text == "photo"
+    assert msg.attachments == []
+    assert msg.metadata["failed_media"][0]["url"] == "https://example.com/blocked.jpg"
+    assert "403 Forbidden" in msg.metadata["failed_media"][0]["error"]
+
+
+async def test_inbound_mms_partial_failure_keeps_successful_attachment(monkeypatch):
+    """One bad MediaUrl among several must not drop the good ones."""
+    good_bytes = b"\xff\xd8\xff good jpeg"
+    calls = {"n": 0}
+
+    async def flaky_download(self, url):
+        calls["n"] += 1
+        if "bad" in url:
+            raise httpx.HTTPStatusError("403 Forbidden", request=None, response=None)
+        return good_bytes
+
+    monkeypatch.setattr(Adapter, "_download_media", flaky_download)
+
+    adapter = Adapter(config={"phone_number": BOT_PHONE})
+    raw = {
+        "From": OWNER_ID,
+        "To": BOT_PHONE,
+        "Body": "two photos",
+        "MessageSid": "MM3",
+        "NumMedia": "2",
+        "MediaUrl0": "https://example.com/bad.jpg",
+        "MediaContentType0": "image/jpeg",
+        "MediaUrl1": "https://example.com/good.jpg",
+        "MediaContentType1": "image/jpeg",
+    }
+    msg = await adapter.on_message(raw)
+
+    assert len(msg.attachments) == 1
+    assert artifacts.get_bytes(msg.attachments[0].ref) == good_bytes
+    assert len(msg.metadata["failed_media"]) == 1
+    assert msg.metadata["failed_media"][0]["url"] == "https://example.com/bad.jpg"
+
+
 class _FakeClient:
     """Stand-in for httpx.AsyncClient that never opens a real connection
     (constructing a real client fails under the test sandbox's SSL setup)."""
