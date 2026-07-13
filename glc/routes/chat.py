@@ -11,9 +11,11 @@ regress them — tests in test_v9_compat.py assert behaviour shape.
 from __future__ import annotations
 
 import asyncio as _asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -289,8 +291,40 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+_BLOCKED_IMAGE_NETS = [
+    ipaddress.ip_network(n)
+    for n in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+]
+_MAX_IMAGE_REDIRECTS = 5
+
+
+def _is_blocked_image_host(host: str | None) -> bool:
+    """Fail closed: an unresolvable host, or one that resolves to any
+    private/loopback/link-local address, is blocked. Every redirect hop
+    is re-checked through this same function — not just the first URL."""
+    if not host:
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    return any(
+        any(ipaddress.ip_address(info[4][0]) in net for net in _BLOCKED_IMAGE_NETS) for info in infos
+    )
+
+
 async def _resolve_image_urls(messages):
     import base64
+    from urllib.parse import urljoin, urlparse
 
     import httpx as _httpx
 
@@ -299,16 +333,33 @@ async def _resolve_image_urls(messages):
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                logger.error("failed to fetch image url %r: %s", url, e, exc_info=True)
-                raise HTTPException(400, "failed to fetch image url") from e
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            current = url
+            for _ in range(_MAX_IMAGE_REDIRECTS + 1):
+                parsed = urlparse(current)
+                if parsed.scheme not in ("http", "https") or _is_blocked_image_host(parsed.hostname):
+                    logger.error("blocked SSRF attempt fetching image url: %r", current)
+                    raise HTTPException(400, "blocked: private/loopback address not allowed")
+                try:
+                    r = await c.get(current)
+                except _httpx.HTTPError as e:
+                    logger.error("failed to fetch image url %r: %s", current, e, exc_info=True)
+                    raise HTTPException(400, "failed to fetch image url") from e
+                if r.is_redirect:
+                    location = r.headers.get("location")
+                    if not location:
+                        break
+                    current = urljoin(current, location)
+                    continue
+                try:
+                    r.raise_for_status()
+                except _httpx.HTTPError as e:
+                    logger.error("failed to fetch image url %r: %s", current, e, exc_info=True)
+                    raise HTTPException(400, "failed to fetch image url") from e
+                mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                b64 = base64.b64encode(r.content).decode()
+                return f"data:{mt};base64,{b64}"
+        raise HTTPException(400, "too many redirects fetching image url")
 
     out = []
     for m in messages:

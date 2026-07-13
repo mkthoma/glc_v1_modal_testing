@@ -8,7 +8,10 @@ gets a generic message.
 
 from __future__ import annotations
 
+import httpx
+
 from glc import providers as P
+from glc.routes import chat as chat_route
 
 
 class _FailingProvider:
@@ -37,7 +40,16 @@ def test_chat_provider_failure_returns_generic_error(app_client, auth_headers):
     assert "gemini" not in body
 
 
-def test_image_fetch_failure_returns_generic_error(app_client, auth_headers):
+def test_image_fetch_failure_returns_generic_error(app_client, auth_headers, monkeypatch):
+    """A URL that resolves to a public address but fails at the HTTP
+    layer (not the SSRF guard) must still get a generic error."""
+    monkeypatch.setattr(chat_route, "_is_blocked_image_host", lambda host: False)
+
+    async def _boom(self, url, *args, **kwargs):
+        raise httpx.ConnectError("secret internal detail: 10.9.9.9 refused connection")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _boom)
+
     r = app_client.post(
         "/v1/chat",
         headers=auth_headers,
@@ -47,7 +59,7 @@ def test_image_fetch_failure_returns_generic_error(app_client, auth_headers):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "describe"},
-                        {"type": "image_url", "image_url": {"url": "http://127.0.0.1:1/nope.png"}},
+                        {"type": "image_url", "image_url": {"url": "http://example.com/nope.png"}},
                     ],
                 }
             ]
@@ -56,3 +68,4 @@ def test_image_fetch_failure_returns_generic_error(app_client, auth_headers):
     assert r.status_code == 400
     body = r.json()["detail"]
     assert body == "failed to fetch image url"
+    assert "10.9.9.9" not in body
