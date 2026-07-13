@@ -84,3 +84,16 @@ def get_rate_limiter() -> RateLimiter:
         _limiter = RateLimiter()
         _limiter.configure_from_yaml(load_channels())
     return _limiter
+
+
+# Shared identity for the HTTP data plane (chat, vision, embed,
+# transcribe, speak). T1.1's auth model issues one shared install
+# token to every caller, so there is no finer-grained per-caller
+# identity signal available at this layer yet — this is honestly a
+# global rate limit on the whole gateway, not per-user throttling.
+DATA_PLANE_CHANNEL = "http_data_plane"
+DATA_PLANE_USER = "shared"
+
+
+def check_data_plane_rate_limit() -> tuple[bool, str]:
+    return get_rate_limiter().check_message(DATA_PLANE_CHANNEL, DATA_PLANE_USER)

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from glc.security.auth import require_data_plane_token
+from glc.security.rate_limits import check_data_plane_rate_limit
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
@@ -30,6 +31,9 @@ class SpeakResponse(BaseModel):
 
 @router.post("/v1/speak", response_model=SpeakResponse, dependencies=[Depends(require_data_plane_token)])
 async def speak_route(req: SpeakRequest):
+    ok, why = check_data_plane_rate_limit()
+    if not ok:
+        raise HTTPException(429, why)
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
     except TTSError as e:

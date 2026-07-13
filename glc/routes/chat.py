@@ -40,8 +40,31 @@ from glc.llm_schemas import (
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
 from glc.security.auth import require_data_plane_token
+from glc.security.rate_limits import check_data_plane_rate_limit
 
 logger = logging.getLogger("glc.chat")
+
+
+def _today_spend_usd() -> float:
+    from glc import pricing as _pricing
+
+    total = 0.0
+    for provider, row in db.aggregate(call_role="worker").items():
+        total += _pricing.estimate_usd(provider, row.get("in_tok") or 0, row.get("out_tok") or 0)
+    return total
+
+
+def _enforce_data_plane_limits() -> None:
+    """Rate limit + hard daily budget cap, shared by /v1/chat and
+    /v1/embed (and, transitively, /v1/vision and /v1/chat/batch, which
+    both dispatch through chat())."""
+    ok, why = check_data_plane_rate_limit()
+    if not ok:
+        raise HTTPException(429, why)
+
+    budget = float(os.getenv("GLC_DAILY_BUDGET_USD", "0") or 0)
+    if budget > 0 and _today_spend_usd() >= budget:
+        raise HTTPException(429, f"daily budget cap of ${budget:.2f} reached")
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -402,6 +425,7 @@ def _validate_structured(text: str, schema: dict):
 
 @router.post("/v1/chat", dependencies=[Depends(require_data_plane_token)])
 async def chat(req: ChatRequest, request: Request):
+    _enforce_data_plane_limits()
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -736,6 +760,7 @@ async def vision(req: VisionRequest, request: Request):
 
 @router.post("/v1/embed", dependencies=[Depends(require_data_plane_token)])
 async def embed(req: EmbedRequest, request: Request):
+    _enforce_data_plane_limits()
     from glc import embedders as E
 
     state = request.app.state

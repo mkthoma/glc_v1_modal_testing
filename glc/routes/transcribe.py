@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from glc.security.auth import require_data_plane_token
+from glc.security.rate_limits import check_data_plane_rate_limit
 from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
@@ -33,6 +34,9 @@ class TranscribeResponse(BaseModel):
     "/v1/transcribe", response_model=TranscribeResponse, dependencies=[Depends(require_data_plane_token)]
 )
 async def transcribe_route(req: TranscribeRequest):
+    ok, why = check_data_plane_rate_limit()
+    if not ok:
+        raise HTTPException(429, why)
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:
