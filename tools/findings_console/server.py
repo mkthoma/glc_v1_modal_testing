@@ -104,6 +104,7 @@ def _free_port(port: int) -> list[int]:
         time.sleep(0.5)  # give the OS a moment to release the socket
     return killed
 
+
 _state: dict[str, object] = {
     "target": Target(name="local", base_url=GATEWAY_URL, install_token=None),
     "gateway_note": "",

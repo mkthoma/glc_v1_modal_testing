@@ -75,9 +75,7 @@ async def channel_ws(websocket: WebSocket, name: str):
                     result={"claimed": env.channel, "route": name},
                 )
                 await websocket.send_text(
-                    json.dumps(
-                        {"error": f"envelope channel {env.channel!r} does not match route {name!r}"}
-                    )
+                    json.dumps({"error": f"envelope channel {env.channel!r} does not match route {name!r}"})
                 )
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return

@@ -66,6 +66,7 @@ def _enforce_data_plane_limits() -> None:
     if budget > 0 and _today_spend_usd() >= budget:
         raise HTTPException(429, f"daily budget cap of ${budget:.2f} reached")
 
+
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
 ROUTER_ORDER = [
@@ -340,9 +341,7 @@ def _is_blocked_image_host(host: str | None) -> bool:
         infos = socket.getaddrinfo(host, None)
     except OSError:
         return True
-    return any(
-        any(ipaddress.ip_address(info[4][0]) in net for net in _BLOCKED_IMAGE_NETS) for info in infos
-    )
+    return any(any(ipaddress.ip_address(info[4][0]) in net for net in _BLOCKED_IMAGE_NETS) for info in infos)
 
 
 async def _resolve_image_urls(messages):
