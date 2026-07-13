@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from glc.security.auth import require_data_plane_token
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
@@ -27,7 +28,7 @@ class SpeakResponse(BaseModel):
     cost_usd: float = 0.0
 
 
-@router.post("/v1/speak", response_model=SpeakResponse)
+@router.post("/v1/speak", response_model=SpeakResponse, dependencies=[Depends(require_data_plane_token)])
 async def speak_route(req: SpeakRequest):
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)

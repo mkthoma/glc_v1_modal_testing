@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from glc.security.auth import require_data_plane_token
 from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
@@ -28,7 +29,9 @@ class TranscribeResponse(BaseModel):
     cost_usd: float = Field(default=0.0)
 
 
-@router.post("/v1/transcribe", response_model=TranscribeResponse)
+@router.post(
+    "/v1/transcribe", response_model=TranscribeResponse, dependencies=[Depends(require_data_plane_token)]
+)
 async def transcribe_route(req: TranscribeRequest):
     try:
         audio = base64.b64decode(req.audio_b64)
