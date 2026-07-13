@@ -1,6 +1,7 @@
 """whisper.cpp wrapper shim.
 
-Expects a `whisper-cli` binary on PATH and a base model at
+Expects an absolute, explicitly-configured `whisper-cli` binary path
+(GLC_WHISPER_CLI_PATH) and a base model at
 ~/.glc/models/whisper-base/ggml-base.bin. Invokes the binary as a
 subprocess, parses the JSON output, returns (text, language,
 duration_ms). The model download is handled by the install script.
@@ -10,13 +11,22 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 MODEL_DIR = Path(os.path.expanduser(os.getenv("GLC_WHISPER_MODEL_DIR", "~/.glc/models/whisper-base")))
 MODEL_FILE = MODEL_DIR / "ggml-base.bin"
+
+# L7 fix: resolve the binary from an explicit, absolute, configured path
+# instead of PATH-based shutil.which() lookup. PATH-based resolution
+# means whichever directory comes first in PATH and contains a file
+# named whisper-cli wins — exploitable if any earlier-loaded,
+# less-trusted code can write to a directory ahead of the real
+# binary's location in PATH. Full closure (running this in a container
+# with no other writable-then-executable paths ahead of it) is Move B
+# territory; this closes the PATH-injection vector itself.
+WHISPER_CLI_PATH = Path(os.getenv("GLC_WHISPER_CLI_PATH", "/usr/local/bin/whisper-cli"))
 
 # No-speech threshold for whisper-cli; default speech-probability cut.
 VAD_THRESHOLD = 0.6
@@ -34,13 +44,13 @@ WHISPER_BEAM_SIZE = int(os.getenv("GLC_WHISPER_BEAM_SIZE", "2"))
 
 
 def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str, str, int]:
-    cli = shutil.which("whisper-cli") or shutil.which("whisper.cpp")
-    if cli is None:
+    if not WHISPER_CLI_PATH.is_file():
         raise RuntimeError(
-            "whisper-cli binary not found on PATH. Install whisper.cpp "
-            "and place its 'whisper-cli' binary on PATH, or use "
-            "prefer='default' for Groq."
+            f"whisper-cli not found at {WHISPER_CLI_PATH} (set GLC_WHISPER_CLI_PATH). "
+            "Install whisper.cpp and point GLC_WHISPER_CLI_PATH at its 'whisper-cli' "
+            "binary, or use prefer='default' for Groq."
         )
+    cli = str(WHISPER_CLI_PATH)
     if not MODEL_FILE.exists():
         raise RuntimeError(
             f"whisper base model not found at {MODEL_FILE}. Run "
