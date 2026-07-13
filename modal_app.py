@@ -58,6 +58,15 @@ llm_secret = modal.Secret.from_name("glc-llm-keys")
     volumes={"/data": data_volume},
     secrets=[llm_secret],
     min_containers=0,  # scale to zero when idle -> protects the free tier
+    # A6 fix: the audit log and gateway db are plain sqlite3.connect()
+    # calls on the shared Volume with no cross-container coordination —
+    # more than one concurrent writer risks a corrupted or split audit
+    # trail. max_containers=1 trades away horizontal scaling for a
+    # single writer, the right trade for a security-critical, low-QPS
+    # audit path. The "real" fix (a dedicated managed database, or a
+    # single append-only writer process separate from request-handling
+    # containers) is Move B/C territory.
+    max_containers=1,
 )
 @modal.asgi_app()
 def fastapi_app():
