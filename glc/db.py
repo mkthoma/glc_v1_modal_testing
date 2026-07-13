@@ -18,6 +18,14 @@ from pathlib import Path
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
 
+# L10 mitigation: log_call() has no caller-identity binding (full closure
+# needs Move B — only the trusted core process should be able to call
+# it), so this input-range check stops the laziest version of ledger
+# poisoning (a wildly out-of-range fabricated value) even before that
+# separation lands. No real provider response comes anywhere near this
+# ceiling — today's largest context windows are well under 2M tokens.
+MAX_TOKENS_PER_CALL = 2_000_000
+
 
 def _ensure_parent() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +104,10 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    if input_tokens < 0 or output_tokens < 0:
+        raise ValueError("token counts cannot be negative")
+    if input_tokens > MAX_TOKENS_PER_CALL or output_tokens > MAX_TOKENS_PER_CALL:
+        raise ValueError(f"token count exceeds sane per-call ceiling ({MAX_TOKENS_PER_CALL})")
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
