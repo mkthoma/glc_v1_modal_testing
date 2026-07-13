@@ -59,3 +59,12 @@ def test_core_gateway_function_does_not_import_adapter_secrets():
     core_fn_block = m.group(0)
     assert "glc-telegram-secret" not in core_fn_block
     assert "GLC_SEPARATED_ADAPTERS" in core_fn_block
+
+
+def test_telegram_egress_allowlist_is_configured():
+    """Move D — telegram's Sandbox egress control must be an allowlist
+    (specific domains), not the coarse all-or-nothing block_network flag
+    that's all modal.Function supports in this Modal version."""
+    src = _source()
+    assert re.search(r"outbound_domain_allowlist", src)
+    assert "api.telegram.org" in src

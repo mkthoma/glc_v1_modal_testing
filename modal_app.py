@@ -131,6 +131,78 @@ def make_adapter_functions(name: str, secret_name: str | None) -> None:
 make_adapter_functions("telegram", "glc-telegram-secret")
 
 
+# ---------------------------------------------------------------------------
+# Move D: egress allowlist via Modal Sandboxes, demonstrated on telegram
+# ---------------------------------------------------------------------------
+# A3/L6: the core gateway Function has no network egress control at all —
+# and needs open egress, since it has to reach every LLM provider. But an
+# adapter doesn't need arbitrary egress: telegram only ever needs
+# api.telegram.org. Restricting that at the container's network boundary
+# is the control that would have stopped the attack chain the SSRF finding
+# (C1) enables — an SSRF response can't be exfiltrated to an
+# attacker-controlled host if the fetching container's egress is
+# allowlisted. This is *one* necessary layer, not sufficient alone (data
+# can still leave through an *allowed* channel, like the adapter's own
+# reply) — not oversold as full closure here or in FINDINGS.md.
+#
+# modal.Function (used by make_adapter_functions above) only exposes an
+# all-or-nothing block_network flag in this Modal version — no domain-level
+# allowlist. Only modal.Sandbox exposes outbound_domain_allowlist. Wiring
+# every real-time webhook call through a freshly-spawned Sandbox would add
+# real per-request latency and complexity that hasn't been justified for
+# this assignment's scope; verify_telegram_egress_allowlist() below proves
+# the mechanism itself actually enforces the allowlist (documented
+# separately from, not silently folded into, the live webhook dispatch
+# path in glc/channels/remote.py).
+# api.telegram.org's TLS connections are actually served from
+# core.telegram.org at the network layer — both need to be listed, or
+# the allowlist blocks Telegram's own API alongside everything else.
+TELEGRAM_EGRESS_ALLOWLIST = ["api.telegram.org", "core.telegram.org"]
+
+
+@app.local_entrypoint()
+def verify_telegram_egress_allowlist():
+    """Run with: uv run modal run modal_app.py::verify_telegram_egress_allowlist
+
+    Spawns a Sandbox scoped to TELEGRAM_EGRESS_ALLOWLIST and proves the
+    allowlist is enforced, not just configured: a request to the allowed
+    domain succeeds, a request to an arbitrary disallowed domain fails.
+    """
+    probe_script = (
+        "import sys, urllib.request\n"
+        "url = sys.argv[1]\n"
+        "try:\n"
+        "    urllib.request.urlopen(url, timeout=8)\n"
+        "    print('REACHED')\n"
+        "except Exception as e:\n"
+        "    print(f'BLOCKED: {e!r}')\n"
+    )
+    sb = modal.Sandbox.create(
+        app=app,
+        image=adapter_image("telegram"),
+        outbound_domain_allowlist=TELEGRAM_EGRESS_ALLOWLIST,
+        timeout=60,
+    )
+    try:
+        sb.filesystem.write_text(probe_script, "/probe.py")
+
+        allowed_proc = sb.exec("python", "/probe.py", "https://api.telegram.org")
+        allowed_out = allowed_proc.stdout.read()
+        allowed_proc.wait()
+
+        blocked_proc = sb.exec("python", "/probe.py", "https://example.com")
+        blocked_out = blocked_proc.stdout.read()
+        blocked_proc.wait()
+    finally:
+        sb.terminate()
+
+    print(f"allowed domain (api.telegram.org): {allowed_out.strip()}")
+    print(f"disallowed domain (example.com):   {blocked_out.strip()}")
+    assert "REACHED" in allowed_out, "allowlisted domain should be reachable"
+    assert "REACHED" not in blocked_out, "non-allowlisted domain should be blocked"
+    print("egress allowlist verified: allowed domain reachable, disallowed domain blocked")
+
+
 @app.function(
     image=image,
     volumes={"/data": data_volume},
