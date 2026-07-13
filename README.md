@@ -343,9 +343,19 @@ against a live gateway):
   yourself too.
 - C2/L9 requires both the route channel and the spoofed channel to be
   `enabled: true` in `channels.yaml`.
-- C5 fires up to 15 rapid requests and C6 up to 20 — prefer running these
+- C5 fires up to 35 rapid requests and C6 up to 20 — prefer running these
   against local dev rather than a live Modal deployment unless you
   specifically want to confirm the deployment's own behavior.
+- **Checks can trip each other's global rate limits/lockouts in a single
+  `Run all checks` pass.** C5's data-plane limiter and C6's pairing-confirm
+  lockout are both global (see their own caveats above), not per-check —
+  so if C6 runs first and exhausts the confirm-attempt lockout, C2/L9's
+  own setup step (which pairs a probe identity via `/v1/control/pair/confirm`)
+  can fail with a *legitimate* `429` from your own C6 fix working
+  correctly, surfacing as `error` rather than `closed`. This isn't a bug
+  in the fix — re-run the affected check by itself once the lockout
+  window (5 minutes) has passed, or run checks individually instead of
+  all at once against a live deployment.
 
 Stop the console with **Ctrl+C** so its shutdown hook can also terminate
 the scratch gateway it may have spawned; a force-kill leaves both

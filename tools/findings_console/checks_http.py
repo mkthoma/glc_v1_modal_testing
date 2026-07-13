@@ -167,11 +167,17 @@ def _check_c4(target: Target) -> CheckResult:
 
 
 def _check_c5(target: Target) -> CheckResult:
+    # 35: comfortably above the packaged channels.yaml default of
+    # messages_per_minute: 30 for the shared http_data_plane rate-limit
+    # bucket the C5 fix uses. 15 (the original probe count here) never
+    # tripped the limit and made a real, working fix read as vulnerable
+    # — found by re-verifying this exact check against a live hardened
+    # deployment.
     body = {"messages": [{"role": "user", "content": "probe"}]}
     statuses: list[int] = []
     try:
         with httpx.Client(timeout=10) as client:
-            for _ in range(15):
+            for _ in range(35):
                 r = client.post(f"{target.base_url}/v1/chat", json=body, headers=_headers(target))
                 statuses.append(r.status_code)
                 if 429 in statuses:

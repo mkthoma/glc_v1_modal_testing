@@ -99,13 +99,26 @@ async def _run_c2(target: Target) -> CheckResult:
         )
     reply_text = reply if isinstance(reply, str) else reply.decode("utf-8", errors="replace")
     evidence = f"url={url}\nsent channel={_SPOOF_CHANNEL} over the {_ROUTE_CHANNEL} route\nreceived: {reply_text[:500]}"
-    if "[glc echo]" in reply_text or "error" not in reply_text.lower():
+    if "[glc echo]" in reply_text:
         return CheckResult(
             "C2",
             target.name,
             CheckKind.WS,
             Verdict.VULNERABLE,
             "the gateway processed and echoed a message whose envelope.channel did not match the WS route",
+            evidence,
+        )
+    if "does not match route" in reply_text:
+        # The fix's actual shape: an explicit rejection message, THEN
+        # close — not a silent close, which _run_c2's earlier branches
+        # already treat as CLOSED. A same-content explicit rejection is
+        # just as unambiguous; don't fall through to MANUAL for it.
+        return CheckResult(
+            "C2",
+            target.name,
+            CheckKind.WS,
+            Verdict.CLOSED,
+            "the gateway sent an explicit channel-mismatch rejection instead of processing the message",
             evidence,
         )
     return CheckResult(
