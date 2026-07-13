@@ -22,23 +22,24 @@ app = modal.App("glc-v1-gateway")
 # audit/schema.sql, and the channel catalogue.
 LOCAL_GLC = Path(__file__).parent / "glc"
 
-# The image = a Linux box with Python 3.11, the same dependencies as
-# pyproject.toml, the glc package copied in, and GLC_CONFIG_DIR pointed at the
-# Volume mount so all databases land on persistent storage instead of the
-# throwaway container filesystem.
+# A5 fix: build from uv.lock instead of a hand-duplicated pip_install
+# list that could silently drift from what's actually tested locally,
+# and pin the base image by digest so it can't shift under us between
+# deploys. Digest resolved via the Docker Hub registry API for
+# python:3.11-slim (the same value `docker pull` + `docker inspect
+# --format='{{index .RepoDigests 0}}'` would produce) — re-resolve and
+# update this if you intentionally want to move to a newer base.
+#
+# The image = a pinned Linux box with Python 3.11, dependencies installed
+# by `uv sync --frozen` against this repo's own uv.lock (so the deployed
+# image can't drift from what's tested locally), the glc package copied
+# in, and GLC_CONFIG_DIR pointed at the Volume mount so all databases
+# land on persistent storage instead of the throwaway container filesystem.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "fastapi>=0.110",
-        "uvicorn[standard]>=0.27",
-        "httpx>=0.27",
-        "python-dotenv>=1.0",
-        "pydantic>=2.6",
-        "jsonschema>=4.21",
-        "pyyaml>=6.0",
-        "websockets>=12.0",
-        "twilio>=9.0",
+    modal.Image.from_registry(
+        "python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3"
     )
+    .uv_sync(extra_options="--no-dev")  # --no-dev: skip pytest/ruff/mypy, the lock is honored either way
     .env({"GLC_CONFIG_DIR": "/data/glc", "GLC_ENV": "production"})
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
