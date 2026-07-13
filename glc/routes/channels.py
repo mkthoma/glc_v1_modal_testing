@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
 from glc.channels import registry
+from glc.channels import remote as adapter_remote
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
@@ -147,16 +148,24 @@ async def channel_webhook_verify(name: str, request: Request):
 
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
-    try:
-        adapter = registry.instantiate(name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
-
     raw = {
         "raw_body": await request.body(),
         "headers": dict(request.headers),
     }
-    msg = await adapter.on_message(raw)
+
+    # Move B/C: separated adapters run on_message/send in their own Modal
+    # Function, with only their own credential in scope — never the LLM
+    # provider Secret this process holds. See glc/channels/remote.py.
+    separated = adapter_remote.is_separated(name)
+    adapter = None
+    if separated:
+        msg = await adapter_remote.remote_on_message(name, raw)
+    else:
+        try:
+            adapter = registry.instantiate(name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
+        msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
 
@@ -206,5 +215,8 @@ async def channel_webhook(name: str, request: Request):
         text=f"[glc echo] {msg.text or ''}",
         thread_id=msg.thread_id,
     )
-    await adapter.send(reply)
+    if separated:
+        await adapter_remote.remote_send(name, reply)
+    else:
+        await adapter.send(reply)
     return {"status": "ok"}

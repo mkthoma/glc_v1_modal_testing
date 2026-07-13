@@ -38,3 +38,24 @@ def test_gateway_function_is_single_writer():
     process or managed DB, which is Move B/C territory)."""
     src = _source()
     assert re.search(r"max_containers\s*=\s*1\b", src)
+
+
+def test_telegram_adapter_has_its_own_function_and_secret():
+    """Move B/C — telegram must run in its own Modal Function with its
+    own scoped Secret, not glm_secret (the LLM provider Secret)."""
+    src = _source()
+    assert re.search(r'name=f"glc-adapter-\{name\}"', src)
+    assert re.search(r'name=f"glc-adapter-\{name\}-send"', src)
+    assert 'make_adapter_functions("telegram", "glc-telegram-secret")' in src
+
+
+def test_core_gateway_function_does_not_import_adapter_secrets():
+    """The core gateway Function's own secrets list must stay scoped to
+    glm_secret only — glc-telegram-secret must never be attached there,
+    or the whole point of the separation is undone."""
+    src = _source()
+    m = re.search(r"@app\.function\(\s*image=image,.*?\n\)", src, re.DOTALL)
+    assert m, "could not locate the core gateway Function's decorator"
+    core_fn_block = m.group(0)
+    assert "glc-telegram-secret" not in core_fn_block
+    assert "GLC_SEPARATED_ADAPTERS" in core_fn_block
