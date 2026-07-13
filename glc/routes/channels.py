@@ -2,8 +2,9 @@
 
 Adapters connect over WebSocket and exchange JSON-serialised
 ChannelMessage and ChannelReply envelopes. The connection is gated by
-the installation token presented in the Authorization header (Sec-Websocket
-clients can pass it as a query string fallback, ?token=...).
+the installation token presented in the Authorization header only —
+there is deliberately no query-string fallback (a bearer token in a
+URL lands in access logs, browser history, and Referrer headers).
 
 This endpoint is the contract surface adapters speak to. The gateway
 processes incoming messages through the rate limiter, allowlist,
@@ -18,7 +19,7 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
@@ -33,13 +34,11 @@ router = APIRouter()
 
 
 @router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+async def channel_ws(websocket: WebSocket, name: str):
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
     if presented != expected:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
