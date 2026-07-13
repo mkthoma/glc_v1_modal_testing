@@ -66,6 +66,22 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level="untrusted",
+                    event_type="channel_spoof_attempt",
+                    result={"claimed": env.channel, "route": name},
+                )
+                await websocket.send_text(
+                    json.dumps(
+                        {"error": f"envelope channel {env.channel!r} does not match route {name!r}"}
+                    )
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
