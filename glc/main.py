@@ -73,7 +73,15 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+_IS_PRODUCTION = os.getenv("GLC_ENV") == "production"
+
+app = FastAPI(
+    title="GLC v1 — Gateway for LLMs and Channels",
+    lifespan=lifespan,
+    docs_url=None if _IS_PRODUCTION else "/docs",
+    redoc_url=None if _IS_PRODUCTION else "/redoc",
+    openapi_url=None if _IS_PRODUCTION else "/openapi.json",
+)
 
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)
