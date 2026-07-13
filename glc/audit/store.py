@@ -19,6 +19,17 @@ DELETEd row leaves a gap the next row's prev_hash can't explain). This
 assumes a single writer, same assumption as the A6 fix (max_containers=1)
 — concurrent writers could each read the same "previous" hash and fork
 the chain rather than extend it linearly.
+
+Known limitation, inherent to hash-chaining without an external
+checkpoint: `verify_chain()` can only detect tampering with a row that
+some *later, still-present* row's `prev_hash` still references. Deleting
+the most recent row(s) — or every row — leaves no later row to contradict
+the deletion, so `verify_chain()` reports the (now-shorter) chain as
+intact. Only mid-chain edits/deletes are caught. Closing this fully needs
+an external, append-only checkpoint of the latest hash (e.g. published
+somewhere the same attacker can't also reach) — out of scope for this
+Part-1 mitigation, which targets the more common "quietly edit or remove
+one record" tamper case.
 """
 
 from __future__ import annotations

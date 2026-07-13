@@ -67,6 +67,29 @@ def test_deleting_a_row_breaks_the_chain(monkeypatch, tmp_path):
     assert broken_at is not None
 
 
+def test_known_limitation_deleting_the_tail_is_not_detected(monkeypatch, tmp_path):
+    """Documented, honest limitation: hash-chaining without an external
+    checkpoint can only catch tampering that some later, still-present
+    row's prev_hash still references. Deleting the most recent row(s) —
+    or the whole table — leaves nothing to contradict the deletion, so
+    verify_chain() reports the (now-shorter) chain as intact. This is
+    why L2 is 'mitigated', not 'closed', in FINDINGS.md."""
+    db_path = tmp_path / "audit.sqlite"
+    monkeypatch.setenv("GLC_AUDIT_DB", str(db_path))
+    init_store()
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="a")
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="b")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM audit_log WHERE event_type='b'")  # the tail
+    conn.commit()
+    conn.close()
+
+    ok, broken_at = verify_chain()
+    assert ok is True
+    assert broken_at is None
+
+
 def test_editing_a_row_in_place_breaks_the_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "audit.sqlite"
     monkeypatch.setenv("GLC_AUDIT_DB", str(db_path))

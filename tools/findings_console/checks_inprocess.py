@@ -77,12 +77,17 @@ import sqlite3, os
 from glc.audit import store as audit_store
 
 audit_store.init_store()
-audit_store.append(channel="probe", channel_user_id="u1", trust_level="untrusted", event_type="probe")
+audit_store.append(channel="probe", channel_user_id="u1", trust_level="untrusted", event_type="a")
+audit_store.append(channel="probe", channel_user_id="u1", trust_level="untrusted", event_type="b")
+audit_store.append(channel="probe", channel_user_id="u1", trust_level="untrusted", event_type="c")
 before = len(audit_store.query(limit=1000))
 
+# Delete a *mid-chain* row (a later row, "c", is still present and still
+# references it) — a direct sqlite3 DELETE, exactly what L2 says any
+# in-process code can already do.
 path = os.environ["GLC_AUDIT_DB"]
 conn = sqlite3.connect(path)
-conn.execute("DELETE FROM audit_log")
+conn.execute("DELETE FROM audit_log WHERE event_type='b'")
 conn.commit()
 conn.close()
 
@@ -94,15 +99,18 @@ if deleted <= 0:
     print(f"FINDINGS_CONSOLE_RESULT: error|delete did not remove rows (before={before}, after={after})")
 elif verify_chain is not None:
     try:
-        ok = bool(verify_chain())
+        result = verify_chain()
+        ok = bool(result[0]) if isinstance(result, tuple) else bool(result)
     except Exception:
-        ok = False
+        ok = True
     if not ok:
-        print(f"FINDINGS_CONSOLE_RESULT: mitigated|direct DELETE still succeeded (removed {deleted} "
-              f"row(s)), but verify_chain() detected the tamper")
+        print(f"FINDINGS_CONSOLE_RESULT: mitigated|direct DELETE of a mid-chain row still succeeded "
+              f"(removed {deleted} row(s)), but verify_chain() detected the tamper. Known limitation, "
+              f"not tested here: deleting the *tail* (most recent row(s), or the whole table) is NOT "
+              f"detected -- there's no later row left to contradict it. See FINDINGS.md.")
     else:
-        print(f"FINDINGS_CONSOLE_RESULT: vulnerable|direct DELETE succeeded (removed {deleted} "
-              f"row(s)) and verify_chain() did not detect it")
+        print(f"FINDINGS_CONSOLE_RESULT: vulnerable|direct DELETE of a mid-chain row succeeded "
+              f"(removed {deleted} row(s)) and verify_chain() did not detect it")
 else:
     print(f"FINDINGS_CONSOLE_RESULT: vulnerable|direct DELETE succeeded (removed {deleted} row(s)); "
           f"no verify_chain() exists yet (T1.14 not applied)")

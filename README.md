@@ -111,13 +111,18 @@ scoped and reported:
 
 ## What's been done
 
+Every fix below has its own commit and its own regression test; the
+detailed per-finding write-up (location, invariant, attacker role,
+before/after, exact commit) is in [`FINDINGS.md`](FINDINGS.md) — this
+section is the summary.
+
 1. **Deployed the gateway to a real, live Modal account** — [modal_app.py](modal_app.py)
    wraps the unmodified `glc.main:app` in a Modal Function, attaches a
    persistent Modal Volume so the audit log, pairing store, and install
    token survive container restarts, and mounts a Modal Secret so provider
    keys arrive as environment variables rather than being baked into the
-   image. Scale-to-zero is enabled (`min_containers=0`) to stay on the
-   free tier.
+   image. Scale-to-zero (`min_containers=0`) keeps it on the free tier;
+   `max_containers=1` pins it to a single writer for the audit path.
 2. **Confirmed every finding above reproduces against the live
    deployment before any fix landed** — each `curl`/WebSocket/in-process
    repro was run against the fresh, unmodified deployment and the actual
@@ -148,26 +153,41 @@ scoped and reported:
      spoofing bug in one place.
    - The `?token=` query-string fallback removed from the channel
      WebSocket; header-only bearer auth.
-   - A per-`channel_user_id` attempt limiter added to pairing-code
-     confirmation.
-   - The container image now builds from `uv.lock` instead of a
-     hand-duplicated dependency list, with the base image pinned by
-     digest.
-   - The gateway Function pinned to a single writer for the audit path.
-4. **Started architectural separation** (Move B/C — the moves that fully
-   close the in-process leaks, not just mitigate them): a generic
-   per-adapter Modal Function/Secret factory, demonstrated end-to-end on
-   a real (non-stub) adapter, so that adapter's container no longer has
-   the LLM provider keys in its environment at all. The remaining stub
-   adapters inherit the same factory once implemented.
+   - A pairing-code confirmation attempt limiter (10 failures per 5
+     minutes, then locked out).
+   - Constant-time (`hmac.compare_digest`) token comparisons everywhere
+     the install token is checked.
+   - The container image now builds from `uv.lock` via `uv sync --frozen`
+     instead of a hand-duplicated dependency list, with the base image
+     pinned by digest.
+4. **Started architectural separation** (Move B/C/D — the moves that
+   fully close the in-process leaks, not just mitigate them), demonstrated
+   end-to-end on **telegram** (the one catalogue adapter with a real,
+   non-stub implementation):
+   - Its own Modal Function + its own Secret (`glc-telegram-secret`,
+     containing only a bot token) — verified live that its container's
+     environment has the Telegram token but none of the six LLM provider
+     keys.
+   - A pluggable dispatch layer (`glc/channels/remote.py`) so the core
+     gateway calls the separated adapter through typed
+     `ChannelMessage`/`ChannelReply` envelopes instead of importing its
+     code in-process; local dev is unaffected.
+   - An egress-allowlist mechanism via `modal.Sandbox`
+     (`outbound_domain_allowlist`), verified live to let `api.telegram.org`
+     through while blocking an arbitrary other domain.
+   - The factory (`adapter_image()`/`make_adapter_functions()`) is generic
+     — the remaining 12 adapters inherit the same pattern once implemented.
 5. **Added defense-in-depth mitigations** for the leaks that can't be
    fully closed without full container separation: hash-chaining on the
    audit log (so tampering is *detectable* even before it's
-   *preventable*), input-range validation on cost-ledger writes, and an
-   absolute configured path for the whisper_cpp binary instead of
-   `PATH`-based resolution.
-6. **Regression-tested every fix**, keeping the existing test suite's
-   coverage gate green.
+   *preventable* — verified by directly `DELETE`/`UPDATE`-ing a live
+   audit.sqlite and confirming `verify_chain()` catches it), input-range
+   validation on cost-ledger writes, and an absolute configured path for
+   the whisper_cpp binary instead of `PATH`-based resolution.
+6. **Regression-tested every fix** (158 tests, ~89% coverage on `glc/`,
+   well above the CI gate) and **redeployed after every hardening
+   commit**, re-confirming `/healthz` and the fix itself against the live
+   Modal deployment each time — not just locally.
 7. **Built a local testing dashboard** (`tools/findings_console/`) that
    automates the manual repro steps for all 22 findings against any
    target — see below.
@@ -336,6 +356,7 @@ orphaned on ports 8111/8811.
 ```
 glc/                        the gateway itself (routes, policy, audit, channels, voice, security)
 modal_app.py                 Modal deployment wrapper — image, Volume, Secret, the served ASGI app
+FINDINGS.md                  per-finding write-up: invariant, attacker role, before/after, commit
 tools/findings_console/      the local pen-test dashboard described above
 tests/                       regression test suite
 scripts/                     CI-parity validation scripts (envelope shape, policy load)

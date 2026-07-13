@@ -19,13 +19,13 @@ MODEL_DIR = Path(os.path.expanduser(os.getenv("GLC_WHISPER_MODEL_DIR", "~/.glc/m
 MODEL_FILE = MODEL_DIR / "ggml-base.bin"
 
 # L7 fix: resolve the binary from an explicit, absolute, configured path
-# instead of PATH-based shutil.which() lookup. PATH-based resolution
-# means whichever directory comes first in PATH and contains a file
-# named whisper-cli wins — exploitable if any earlier-loaded,
-# less-trusted code can write to a directory ahead of the real
-# binary's location in PATH. Full closure (running this in a container
-# with no other writable-then-executable paths ahead of it) is Move B
-# territory; this closes the PATH-injection vector itself.
+# instead of searching the PATH environment variable for it. Searching
+# PATH means whichever directory comes first and contains a file named
+# whisper-cli wins — exploitable if any earlier-loaded, less-trusted
+# code can write to a directory ahead of the real binary's location in
+# PATH. Full closure (running this in a container with no other
+# writable-then-executable paths ahead of it) is Move B territory; this
+# closes the PATH-injection vector itself.
 WHISPER_CLI_PATH = Path(os.getenv("GLC_WHISPER_CLI_PATH", "/usr/local/bin/whisper-cli"))
 
 # No-speech threshold for whisper-cli; default speech-probability cut.
