@@ -32,8 +32,17 @@ pairings.sqlite
 gateway.sqlite
 install_token
 
+# Findings console (tools/findings_console) — local security-testing
+# dashboard, never deployed. Its run log is your own scratch data.
+.findings_console/
+
 # Old generator artifacts
 /tmp/
 
 # Logs
 *.log
+
+# Session/assignment planning docs — not part of the shipped gateway
+PLAN.md
+GROUPS.md
+CLAUDE.md
