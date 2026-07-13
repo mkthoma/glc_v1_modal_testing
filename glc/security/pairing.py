@@ -15,12 +15,28 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 CODE_TTL_SECONDS = 5 * 60
+
+# Defense-in-depth attempt limiter for confirm_code(). The endpoint has no
+# per-caller identity available at this layer (a wrong guess doesn't reveal
+# whose pairing it was meant for), so this is a global lockout — same
+# honest caveat as the data-plane rate limiter: it throttles "anyone
+# guessing codes," not "each attacker individually." Still closes the
+# unbounded-brute-force gap.
+CONFIRM_ATTEMPT_LIMIT = 10
+CONFIRM_ATTEMPT_WINDOW_SECONDS = 5 * 60
+
+
+class PairingLockedOut(Exception):
+    """Raised by confirm_code() when the brute-force attempt limit has
+    been hit. Distinct from 'code unknown or expired' so callers can
+    return 429 instead of 404."""
 
 
 def _resolve_path() -> str:
@@ -51,7 +67,19 @@ class PairingRecord:
 class PairingStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._confirm_failures: deque[float] = deque()
         self._init_schema()
+
+    def _is_confirm_locked_out(self) -> bool:
+        now = time.time()
+        with self._lock:
+            while self._confirm_failures and self._confirm_failures[0] < now - CONFIRM_ATTEMPT_WINDOW_SECONDS:
+                self._confirm_failures.popleft()
+            return len(self._confirm_failures) >= CONFIRM_ATTEMPT_LIMIT
+
+    def _record_confirm_failure(self) -> None:
+        with self._lock:
+            self._confirm_failures.append(time.time())
 
     def _init_schema(self) -> None:
         with _conn() as c:
@@ -96,15 +124,22 @@ class PairingStore:
         return code, expires_at
 
     def confirm_code(self, code: str) -> PairingRecord | None:
+        if self._is_confirm_locked_out():
+            raise PairingLockedOut(
+                f"too many failed pairing confirmations "
+                f"({CONFIRM_ATTEMPT_LIMIT} per {CONFIRM_ATTEMPT_WINDOW_SECONDS}s) — try again later"
+            )
         with _conn() as c:
             row = c.execute(
                 "SELECT * FROM pending_codes WHERE code=?",
                 (code,),
             ).fetchone()
             if row is None:
+                self._record_confirm_failure()
                 return None
             if row["expires_at"] < time.time():
                 c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                self._record_confirm_failure()
                 return None
             paired_at = time.time()
             c.execute(
