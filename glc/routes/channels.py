@@ -40,7 +40,7 @@ async def channel_ws(websocket: WebSocket, name: str):
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
     expected = get_or_create_install_token()
-    if presented != expected:
+    if presented is None or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
