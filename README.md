@@ -160,23 +160,33 @@ section is the summary.
    - The container image now builds from `uv.lock` via `uv sync --frozen`
      instead of a hand-duplicated dependency list, with the base image
      pinned by digest.
-4. **Started architectural separation** (Move B/C/D — the moves that
-   fully close the in-process leaks, not just mitigate them), demonstrated
-   end-to-end on **telegram** (the one catalogue adapter with a real,
-   non-stub implementation):
-   - Its own Modal Function + its own Secret (`glc-telegram-secret`,
-     containing only a bot token) — verified live that its container's
-     environment has the Telegram token but none of the six LLM provider
-     keys.
+4. **Architectural separation** (Move B/C — the moves that fully close
+   the in-process credential leaks, not just mitigate them), applied to
+   **every one of the 15 catalogue adapters**, not just a demonstration
+   subset:
+   - An earlier pass migrated only telegram, on the assumption
+     (inherited, never checked) that the other 14 adapters were still
+     unimplemented stubs. They aren't — every adapter under
+     `glc/channels/catalogue/` has a real `on_message`/`send`
+     implementation, so there was no reason to leave them sharing the
+     LLM provider Secret. All 15 now run in their own Modal Function
+     with their own scoped Secret (`glc-discord-secret`,
+     `glc-slack-secret`, ... — or no Secret at all for `local_mic`/`webui`,
+     which need no external credential).
+   - Verified live: a throwaway probe sharing the core gateway's exact
+     Secret configuration shows all six LLM keys present and zero
+     adapter credentials; a probe sharing `slack`'s configuration shows
+     only its own token, zero LLM keys, zero other adapters' credentials.
    - A pluggable dispatch layer (`glc/channels/remote.py`) so the core
-     gateway calls the separated adapter through typed
-     `ChannelMessage`/`ChannelReply` envelopes instead of importing its
-     code in-process; local dev is unaffected.
-   - An egress-allowlist mechanism via `modal.Sandbox`
-     (`outbound_domain_allowlist`), verified live to let `api.telegram.org`
-     through while blocking an arbitrary other domain.
-   - The factory (`adapter_image()`/`make_adapter_functions()`) is generic
-     — the remaining 12 adapters inherit the same pattern once implemented.
+     gateway calls every separated adapter through typed
+     `ChannelMessage`/`ChannelReply` envelopes instead of importing any
+     adapter's code in-process; local dev is unaffected.
+   - **Egress allowlisting (Move D)** via `modal.Sandbox`
+     (`outbound_domain_allowlist`) remains a demonstration on telegram
+     only, verified live to let `api.telegram.org` through while
+     blocking an arbitrary other domain — not wired into the live
+     per-request dispatch path or extended to the other 14 adapters (see
+     `FINDINGS.md` for why).
 5. **Added defense-in-depth mitigations** for the leaks that can't be
    fully closed without full container separation: hash-chaining on the
    audit log (so tampering is *detectable* even before it's

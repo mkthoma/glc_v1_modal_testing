@@ -4,7 +4,7 @@ This is the required note: for each finding, the invariant it broke and the fix 
 
 Two things worth being upfront about, since they shape how "closed" is used below:
 
-- Only **C2/L9** (cross-channel envelope spoofing) is closable with a pure application-layer code change. **L1–L5, L7, L8, L10 fundamentally require process/container separation to be fully closed** — Python has no in-process ACL on `os.environ` or on importable functions, so the only real wall is a kernel-enforced process boundary. Of these, **L1, L2, L7, L10 got a real Part-1-scope mitigation** (per-adapter separation for telegram, hash-chaining, an absolute binary path, input validation, respectively); **L3, L4, L5, L8 got none** — no code-level fix closes them at all without Move B, and they're marked **open**, not mitigated, below. Don't take "mitigated" to mean every leak in this range has a corresponding fix; check each entry's own Status line.
+- Only **C2/L9** (cross-channel envelope spoofing) is closable with a pure application-layer code change. **L1–L5, L7, L8, L10 fundamentally require process/container separation to be fully closed** — Python has no in-process ACL on `os.environ` or on importable functions, so the only real wall is a kernel-enforced process boundary. Of these, **L1 is now fully closed** (every catalogue adapter has its own container + Secret) and **L2, L7, L10 got a real Part-1-scope mitigation** (hash-chaining, an absolute binary path, input validation, respectively); **L3, L4, L5, L8 got none** — these aren't adapter leaks at all (they live in the core gateway's own security internals), so adapter separation doesn't touch them, and they're marked **open**, not mitigated, below. Don't take "mitigated" to mean every leak in this range has a corresponding fix; check each entry's own Status line.
 - **A4 and L1 are the same underlying gap** (one shared Secret), described at the deployment-config level and the code-consequence level. **C2 and L9 are the literal same bug**, named twice.
 
 ## Section A — Introduced or elevated by the Modal migration
@@ -36,22 +36,23 @@ Two things worth being upfront about, since they shape how "closed" is used belo
 **Location:** `modal_app.py`
 **Invariant broken:** INV-2/INV-3
 **Attacker role reached:** AR1/AR3
-**Status:** mitigated (full closure requires every adapter migrated)
+**Status:** container separation fully closed (all 15 adapters); egress wall still only demonstrated for telegram
 
-**Before:** one `@app.function`, no `modal.Sandbox`, no egress control at all.
-**Fix:** the telegram adapter now runs in its own Function (Move B/C) and its egress is demonstrably allowlist-able via `modal.Sandbox` (Move D). Commits: `harden: per-adapter container + scoped Secret, telegram (Move B/C)`, `harden: egress allowlist via Modal Sandbox, telegram (Move D)`.
-**Re-verified:** `uv run modal run modal_app.py::verify_telegram_egress_allowlist` — a request to `api.telegram.org` succeeds, a request to `example.com` is blocked. Not wired into the live per-request webhook dispatch path (see Move D note below) and not yet applied to any adapter besides telegram — the core gateway Function itself still has open egress, which it needs to reach LLM providers.
+**Before:** one `@app.function` served the entire gateway plus every adapter, no `modal.Sandbox`, no egress control at all.
+**Correction from an earlier draft of this file:** the first pass at Move B/C migrated only telegram, on the belief (inherited from the assignment's own framing, never independently checked) that the other 14 catalogue adapters were still `NotImplementedError` stubs not worth containerizing yet. That was wrong — `grep -rn "raise NotImplementedError" glc/channels/catalogue/*/adapter.py` returns nothing; every adapter has a real implementation. There was no remaining reason to leave 14 of them sharing the core gateway's LLM Secret, so all 15 are now migrated.
+**Fix:** every catalogue adapter now runs in its own Modal Function via `modal_app.py`'s `ADAPTER_SECRETS` mapping + `make_adapter_functions()`; the core gateway Function never imports adapter code in-process. Egress allowlisting via `modal.Sandbox` remains demonstrated only for telegram (Move D). Commits: `harden: per-adapter container + scoped Secret, telegram (Move B/C)`, `harden: migrate all 15 catalogue adapters to per-adapter Functions + Secrets (Move B/C gateway-wide)`, `harden: egress allowlist via Modal Sandbox, telegram (Move D)`.
+**Re-verified:** `uv run modal run modal_app.py::verify_telegram_egress_allowlist` — a request to `api.telegram.org` succeeds, a request to `example.com` is blocked. The egress wall itself is **not** wired into the live per-request webhook dispatch path for any adapter (see Move D note below), and the core gateway Function still has open egress, which it needs to reach LLM providers — that part of A3 stays "mitigated," not closed.
 
 ### A4 — One Secret for the whole Function
 
 **Location:** `modal_app.py`
 **Invariant broken:** INV-1
 **Attacker role reached:** AR3
-**Status:** mitigated for telegram, open for the other 12 adapters
+**Status:** fully closed, all 15 adapters
 
 **Before:** `llm_secret` mounted to the entire `fastapi_app` Function — every route and every adapter could read every provider key.
-**Fix:** same as A3/L1 — `make_adapter_functions("telegram", "glc-telegram-secret")` gives telegram its own Secret containing only `TELEGRAM_BOT_TOKEN`, never `glc-llm-keys`. Commit: `harden: per-adapter container + scoped Secret, telegram (Move B/C)`.
-**Re-verified:** a throwaway probe Function sharing the exact telegram image + Secret configuration read its own `os.environ` live on Modal: `TELEGRAM_BOT_TOKEN` present, all six LLM provider keys (`GEMINI_API_KEY`, `GITHUB_ACCESS_TOKEN`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `CEREBRAS_API_KEY`, `OPEN_ROUTER_API_KEY`) absent.
+**Fix:** `modal_app.py`'s `ADAPTER_SECRETS` dict maps every one of the 15 catalogue adapters to its own Secret (`glc-discord-secret`, `glc-gmail-secret`, `glc-imap-secret`, `glc-line-secret`, `glc-matrix-secret`, `glc-signal-secret`, `glc-slack-secret`, `glc-teams-secret`, `glc-telegram-secret`, `glc-twilio-sms-secret`, `glc-twilio-voice-secret`, `glc-webhook-secret`, `glc-whatsapp-secret`, or `None` for `local_mic`/`webui`, which need no external credential) — never `glc-llm-keys`. Commit: `harden: migrate all 15 catalogue adapters to per-adapter Functions + Secrets (Move B/C gateway-wide)`.
+**Re-verified:** two throwaway probe Functions sharing the exact live secret configuration, read directly on Modal: the core gateway's probe (`glc-llm-keys` only) showed all six LLM keys present and zero of the twelve adapter credentials; a `slack`-scoped probe (`glc-slack-secret` only) showed its own token present and zero LLM keys, zero other adapters' credentials.
 
 ### A5 — Non-reproducible image
 
@@ -83,9 +84,9 @@ Two things worth being upfront about, since they shape how "closed" is used belo
 
 **Location:** structural — any code in `fastapi_app` can read every provider key
 **Invariant broken:** INV-1
-**Status:** mitigated for telegram (Move B/C), open for the other 12 adapters
+**Status:** fully closed for every catalogue adapter (the core gateway's own routes still share one process by necessity — they're the trusted core, not an adapter)
 
-Same fix and verification as A4 above — this is A4's code-level consequence, closed in the same commit.
+Same fix and verification as A4 above — this is A4's code-level consequence, closed in the same commits. The `findings_console`'s L1 check will still always report `vulnerable` when run locally: it demonstrates the leak from *inside the current process*, and can't observe a separated adapter's container from outside it (documented tool limitation, not a real gap) — see the README's known-limitations list.
 
 ### L2 — Audit log writable
 
@@ -238,7 +239,7 @@ Literal same bug as C2 — see Section C.
 
 ## Not fixed this round (honest gaps)
 
-- **L3, L4, L5, L8** — no Part-1-scope code fix closes these; they require Move B (process/container separation) applied gateway-wide, not just to telegram. (L3 was incorrectly marked "mitigated" in an earlier draft of this file — corrected above: `force_pair_owner()` writes to a separate SQLite file the L2 hash-chain fix never touches.)
-- **A3/A4/L1/L6 full closure** — only telegram has been migrated behind Move B/C/D. The remaining 12 catalogue adapters (11 stubs + non-migrated real ones) still run in-process with full access to the LLM provider Secret. The factory (`adapter_image()`/`make_adapter_functions()` in `modal_app.py`) is generic and ready to apply to each one as it's implemented.
-- **Move D (egress allowlist)** is demonstrated as a working mechanism (`verify_telegram_egress_allowlist`), not wired into the live per-request webhook dispatch path — spawning a fresh Sandbox per webhook call would add real per-request latency and complexity not justified for this assignment's scope.
+- **L3, L4, L5, L8 are not adapter leaks — migrating every adapter (below) does not touch them.** They live in the core gateway's own security internals (`force_pair_owner()`, the install-token file, the policy engine singleton, `os.kill`), not in any adapter's code, so per-adapter container separation has no effect on them. Closing them needs a *further* architectural split — separating the core gateway's own control-plane/security internals from its request-handling code — which is a deeper change than "every adapter gets its own container" and is out of scope here. (L3 was incorrectly marked "mitigated" in an earlier draft of this file — corrected above: `force_pair_owner()` writes to a separate SQLite file the L2 hash-chain fix never touches.)
+- **A3/L6 egress-wall full closure** — container separation (A4/L1) is now done for all 15 catalogue adapters, but the egress-allowlist mechanism (Move D) is only demonstrated for telegram, and isn't wired into the live per-request webhook dispatch path for any adapter (see below). The core gateway Function itself also still has open egress, which it legitimately needs to reach LLM providers.
+- **Move D (egress allowlist)** is demonstrated as a working mechanism (`verify_telegram_egress_allowlist`), not wired into the live per-request webhook dispatch path — spawning a fresh Sandbox per webhook call would add real per-request latency and complexity not justified for this assignment's scope, and hasn't been extended to the other 14 adapters.
 - **C5's rate limit/budget cap is global, not per-caller** — a consequence of A1's single shared install token. Finer-grained throttling would need a second identity signal (per-client API keys, or source IP as a coarse proxy).

@@ -54,7 +54,7 @@ llm_secret = modal.Secret.from_name("glc-llm-keys")
 
 
 # ---------------------------------------------------------------------------
-# Move B/C: per-adapter container + scoped Secret, demonstrated on telegram
+# Move B/C: per-adapter container + scoped Secret — every adapter
 # ---------------------------------------------------------------------------
 # L1-L5/L7/L8/L10 all exist because every adapter and every route share one
 # Python process with the core gateway's LLM provider keys — Python has no
@@ -62,17 +62,26 @@ llm_secret = modal.Secret.from_name("glc-llm-keys")
 # code-level permission checking closes this. The only real wall is a
 # process/container boundary the kernel enforces (namespaces + cgroups).
 #
-# This factory builds that boundary generically; telegram (the one
-# catalogue adapter confirmed to have a real, non-stub on_message/send
-# implementation — glc/channels/catalogue/telegram/adapter.py) demonstrates
-# it end-to-end with working code, not a stub. The core gateway Function
-# stops importing/calling telegram's adapter code in-process; it calls
-# these two Functions via glc/channels/remote.py instead, communicating
-# only through the typed ChannelMessage/ChannelReply envelopes that already
-# exist (glc/channels/envelope.py) — the "typed contract, no shared memory"
-# boundary docs/ARCHITECTURE.md describes as the intended design. The
-# remaining stub adapters inherit the same factory once implemented; the
-# architecture is fixed even though not every adapter has been migrated.
+# An earlier version of this file migrated only telegram, on the belief
+# (inherited from the lecture's own framing, never independently checked)
+# that the other 14 catalogue adapters were still NotImplementedError
+# stubs not worth containerizing yet. That belief was wrong: every adapter
+# under glc/channels/catalogue/ has a real, non-stub on_message/send
+# implementation (confirmed by grepping each adapter.py for
+# "raise NotImplementedError" and finding none). Once that was checked,
+# there was no remaining reason to leave 14 of them sharing the core
+# gateway's LLM provider Secret — so all 15 are migrated here.
+#
+# The core gateway Function never imports any adapter's code in-process;
+# it calls each one's own Function via glc/channels/remote.py instead,
+# communicating only through the typed ChannelMessage/ChannelReply
+# envelopes that already exist (glc/channels/envelope.py) — the "typed
+# contract, no shared memory" boundary docs/ARCHITECTURE.md describes as
+# the intended design.
+#
+# local_mic and webui need no external credential (local audio device /
+# local WS respectively) and get secret_name=None — no Secret attached,
+# nothing to scope.
 
 
 def adapter_image(adapter_name: str) -> modal.Image:
@@ -125,10 +134,30 @@ def make_adapter_functions(name: str, secret_name: str | None) -> None:
         return result if isinstance(result, dict) else {"result": result}
 
 
-# The Telegram bot token lives in its own Secret, created separately with
-# `modal secret create glc-telegram-secret TELEGRAM_BOT_TOKEN=telegram-mock-not-real`
-# — mock value, same rule as glc-llm-keys.
-make_adapter_functions("telegram", "glc-telegram-secret")
+# Each entry's Secret was created separately with
+# `modal secret create glc-<name>-secret <FIELD>=<name>-mock-not-real ...`
+# — mock values only, same rule as glc-llm-keys. secret_name=None means
+# the adapter needs no external credential at all.
+ADAPTER_SECRETS: dict[str, str | None] = {
+    "discord": "glc-discord-secret",
+    "gmail": "glc-gmail-secret",
+    "imap": "glc-imap-secret",
+    "line": "glc-line-secret",
+    "local_mic": None,
+    "matrix": "glc-matrix-secret",
+    "signal": "glc-signal-secret",
+    "slack": "glc-slack-secret",
+    "teams": "glc-teams-secret",
+    "telegram": "glc-telegram-secret",
+    "twilio_sms": "glc-twilio-sms-secret",
+    "twilio_voice": "glc-twilio-voice-secret",
+    "webhook": "glc-webhook-secret",
+    "webui": None,
+    "whatsapp": "glc-whatsapp-secret",
+}
+
+for _adapter_name, _secret_name in ADAPTER_SECRETS.items():
+    make_adapter_functions(_adapter_name, _secret_name)
 
 
 # ---------------------------------------------------------------------------
@@ -207,10 +236,11 @@ def verify_telegram_egress_allowlist():
     image=image,
     volumes={"/data": data_volume},
     secrets=[llm_secret],
-    # Move B/C: telegram's on_message/send now run in their own Function
-    # (above), so this core Function never imports its adapter code and
-    # never has TELEGRAM_BOT_TOKEN in its environment.
-    env={"GLC_SEPARATED_ADAPTERS": "telegram"},
+    # Move B/C: every adapter's on_message/send now runs in its own
+    # Function (above), so this core Function never imports adapter code
+    # in-process and never has any channel credential in its environment
+    # — only glc-llm-keys.
+    env={"GLC_SEPARATED_ADAPTERS": ",".join(ADAPTER_SECRETS)},
     min_containers=0,  # scale to zero when idle -> protects the free tier
     # A6 fix: the audit log and gateway db are plain sqlite3.connect()
     # calls on the shared Volume with no cross-container coordination —

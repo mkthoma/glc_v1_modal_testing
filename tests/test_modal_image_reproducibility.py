@@ -40,24 +40,68 @@ def test_gateway_function_is_single_writer():
     assert re.search(r"max_containers\s*=\s*1\b", src)
 
 
-def test_telegram_adapter_has_its_own_function_and_secret():
-    """Move B/C — telegram must run in its own Modal Function with its
-    own scoped Secret, not glm_secret (the LLM provider Secret)."""
+ALL_CATALOGUE_ADAPTERS = [
+    p.name
+    for p in (Path(__file__).parent.parent / "glc" / "channels" / "catalogue").iterdir()
+    if p.is_dir() and p.name != "__pycache__"
+]
+
+# Every adapter under glc/channels/catalogue/ has a real, non-stub
+# implementation (verified by grepping each adapter.py for
+# "raise NotImplementedError" and finding none) — an earlier version of
+# modal_app.py migrated only telegram on the mistaken assumption that
+# the other 14 were still stubs. There's no adapter left that
+# legitimately needs to share the core gateway's LLM provider Secret.
+ADAPTERS_NEEDING_NO_SECRET = {"local_mic", "webui"}
+
+
+def test_every_catalogue_adapter_is_registered_in_modal_app():
+    """Move B/C — every real adapter must have its own Modal Function
+    registration, not just a demonstrated subset."""
     src = _source()
-    assert re.search(r'name=f"glc-adapter-\{name\}"', src)
-    assert re.search(r'name=f"glc-adapter-\{name\}-send"', src)
-    assert 'make_adapter_functions("telegram", "glc-telegram-secret")' in src
+    m = re.search(r"ADAPTER_SECRETS[^{]*=\s*\{(.*?)\n\}", src, re.DOTALL)
+    assert m, "could not locate the ADAPTER_SECRETS mapping in modal_app.py"
+    mapping_src = m.group(1)
+    for name in ALL_CATALOGUE_ADAPTERS:
+        assert f'"{name}"' in mapping_src, f"{name} is missing from ADAPTER_SECRETS"
+
+
+def test_adapters_needing_credentials_get_their_own_secret():
+    src = _source()
+    m = re.search(r"ADAPTER_SECRETS[^{]*=\s*\{(.*?)\n\}", src, re.DOTALL)
+    assert m
+    mapping_src = m.group(1)
+    for name in ALL_CATALOGUE_ADAPTERS:
+        if name in ADAPTERS_NEEDING_NO_SECRET:
+            assert re.search(rf'"{name}"\s*:\s*None', mapping_src), f"{name} should map to None"
+        else:
+            assert re.search(rf'"{name}"\s*:\s*"glc-[\w-]+-secret"', mapping_src), (
+                f"{name} should map to its own glc-<name>-secret"
+            )
+
+
+def test_no_two_adapters_share_the_same_secret_name():
+    """Each adapter's Secret must be its own — sharing one Secret across
+    multiple adapters would undo the whole point of scoped credentials
+    (INV-1/INV-4), even if it happened to be less code to write."""
+    src = _source()
+    m = re.search(r"ADAPTER_SECRETS[^{]*=\s*\{(.*?)\n\}", src, re.DOTALL)
+    assert m
+    secret_names = re.findall(r':\s*"(glc-[\w-]+-secret)"', m.group(1))
+    assert len(secret_names) == len(set(secret_names)), f"duplicate secret names: {secret_names}"
 
 
 def test_core_gateway_function_does_not_import_adapter_secrets():
     """The core gateway Function's own secrets list must stay scoped to
-    glm_secret only — glc-telegram-secret must never be attached there,
+    glm_secret only — no per-adapter secret must ever be attached there,
     or the whole point of the separation is undone."""
     src = _source()
     m = re.search(r"@app\.function\(\s*image=image,.*?\n\)", src, re.DOTALL)
     assert m, "could not locate the core gateway Function's decorator"
     core_fn_block = m.group(0)
-    assert "glc-telegram-secret" not in core_fn_block
+    assert "secrets=[llm_secret]" in core_fn_block
+    for name in ALL_CATALOGUE_ADAPTERS:
+        assert f"glc-{name}-secret" not in core_fn_block
     assert "GLC_SEPARATED_ADAPTERS" in core_fn_block
 
 
