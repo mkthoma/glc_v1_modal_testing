@@ -193,6 +193,41 @@ def _check_c3(target: Target) -> CheckResult:
     return asyncio.run(_run_c3(target))
 
 
+_C2_COMMAND = """python3 - <<'PY'
+import asyncio, json, websockets
+
+url = "__BASE_URL__".replace("https://", "wss://").replace("http://", "ws://") + "/v1/channels/webui"
+headers = {"Authorization": "Bearer __TOKEN__"}
+
+async def main():
+    async with websockets.connect(url, additional_headers=headers) as ws:
+        # connected to the webui route, but claim to be a whatsapp message
+        await ws.send(json.dumps({
+            "channel": "whatsapp", "channel_user_id": "attacker", "user_handle": "probe",
+            "trust_level": "untrusted", "arrived_at": "2026-01-01T00:00:00Z",
+        }))
+        print(await ws.recv())
+
+asyncio.run(main())
+PY"""
+
+_C3_COMMAND = """python3 - <<'PY'
+import asyncio, json, websockets
+
+# token only in the query string, no Authorization header at all
+url = "__BASE_URL__".replace("https://", "wss://").replace("http://", "ws://") + "/v1/channels/telegram?token=__TOKEN__"
+
+async def main():
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({
+            "channel": "telegram", "channel_user_id": "attacker", "user_handle": "probe",
+            "trust_level": "untrusted", "arrived_at": "2026-01-01T00:00:00Z",
+        }))
+        print(await ws.recv())
+
+asyncio.run(main())
+PY"""
+
 CHECKS: list[Check] = [
     Check(
         "C2",
@@ -206,6 +241,12 @@ CHECKS: list[Check] = [
         notes="Same underlying bug as L9 in the ground-truth table. Uses webui/whatsapp (not "
         "telegram/discord) because those are the channels enabled by default in channels.yaml.",
         attacker_role="AR3",
+        command=_C2_COMMAND,
+        fix_summary=(
+            "glc/routes/channels.py's channel_ws now checks `if env.channel != name:` and closes the "
+            "socket with WS_1008_POLICY_VIOLATION plus an explicit rejection message, instead of "
+            "processing (and echoing) an envelope whose channel doesn't match the WS route it arrived on."
+        ),
     ),
     Check(
         "C3",
@@ -216,5 +257,11 @@ CHECKS: list[Check] = [
         _check_c3,
         "T1.7",
         attacker_role="AR1",
+        command=_C3_COMMAND,
+        fix_summary=(
+            "glc/routes/channels.py removes the `token: str | None = Query(...)` fallback entirely — "
+            "channel_ws now only accepts the token from the Authorization header, so a URL-only token "
+            "(which leaks into proxy/access logs) is rejected at handshake."
+        ),
     ),
 ]

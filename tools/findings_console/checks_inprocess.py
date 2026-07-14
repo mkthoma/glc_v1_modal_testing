@@ -141,18 +141,39 @@ else:
 """
 
 _L5_SNIPPET = """
+import sys
 import glc.policy.engine as engine
 from glc.policy.schemas import PolicyVerdict
 
 before = engine.evaluate({"name": "dangerous.tool", "arguments": {}}, {"channel": "x", "trust_level": "untrusted"})
-engine.evaluate = lambda *a, **k: PolicyVerdict(action="allow", reason="findings-console-pwned")
-after = engine.evaluate({"name": "dangerous.tool", "arguments": {}}, {"channel": "x", "trust_level": "untrusted"})
 
-if before.action == "deny" and after.action == "allow":
-    print("FINDINGS_CONSOLE_RESULT: vulnerable|glc.policy.engine.evaluate is an ordinary rebindable "
-          "attribute; default-deny for untrusted was silently replaced with always-allow")
-else:
-    print(f"FINDINGS_CONSOLE_RESULT: error|unexpected before={before.action} after={after.action}")
+try:
+    engine.evaluate = lambda *a, **k: PolicyVerdict(action="allow", reason="findings-console-pwned")
+    after = engine.evaluate({"name": "dangerous.tool", "arguments": {}}, {"channel": "x", "trust_level": "untrusted"})
+    if before.action == "deny" and after.action == "allow":
+        print("FINDINGS_CONSOLE_RESULT: vulnerable|glc.policy.engine.evaluate is an ordinary rebindable "
+              "attribute; default-deny for untrusted was silently replaced with always-allow")
+    else:
+        print(f"FINDINGS_CONSOLE_RESULT: error|unexpected before={before.action} after={after.action}")
+except AttributeError as e:
+    # The exact one-liner the finding names is now rejected. Still
+    # "mitigated," not "closed": the identical outcome is one line away
+    # via a direct __dict__ write, which bypasses __setattr__ entirely
+    # and is exactly as easy for an attacker who already has code
+    # execution in this process. Same class of residual gap as L2's
+    # hash-chain tail-deletion limitation.
+    sys.modules["glc.policy.engine"].__dict__["evaluate"] = lambda *a, **k: PolicyVerdict(
+        action="allow", reason="findings-console-pwned-via-dict-write"
+    )
+    after = engine.evaluate({"name": "dangerous.tool", "arguments": {}}, {"channel": "x", "trust_level": "untrusted"})
+    if after.action == "allow":
+        print(f"FINDINGS_CONSOLE_RESULT: mitigated|direct reassignment now raises ({e}), but writing "
+              f"straight to glc.policy.engine.__dict__['evaluate'] bypasses that check and produces the "
+              f"identical outcome (default-deny replaced with always-allow) for the same AR4 attacker. "
+              f"The separated glc-policy-engine Function (evaluate_remote()) is immune to both "
+              f"techniques, but nothing calls it yet — see FINDINGS.md.")
+    else:
+        print(f"FINDINGS_CONSOLE_RESULT: error|__dict__ write did not take effect (after={after.action})")
 """
 
 _L8_SNIPPET = """
@@ -195,10 +216,13 @@ def _make(
     snippet: str,
     plan_task: str,
     attacker_role: str,
+    fix_summary: str = "",
+    notes: str = "",
 ) -> Check:
     def _runner(target: Target, _snippet: str = snippet, _id: str = check_id) -> CheckResult:
         return _run(_snippet, target, _id)
 
+    default_notes = "Runs in an isolated scratch subprocess — never touches your real ~/.glc state."
     return Check(
         id=check_id,
         title=title,
@@ -207,10 +231,24 @@ def _make(
         description=description,
         run=_runner,
         plan_task=plan_task,
-        notes="Runs in an isolated scratch subprocess — never touches your real ~/.glc state.",
+        notes=f"{default_notes} {notes}".strip() if notes else default_notes,
         attacker_role=attacker_role,
+        command=f"python3 -c '{snippet.strip()}'",
+        fix_summary=fix_summary,
     )
 
+
+_CONTAINER_ISOLATION_FIX = (
+    "modal_app.py's make_adapter_functions() puts every catalogue adapter in its own Modal Function "
+    "(a real container), and adapter_image() deliberately never sets GLC_CONFIG_DIR/GLC_AUDIT_DB/"
+    "GLC_PAIRING_DB/GLC_GATEWAY_DB or mounts the Volume. This check always reports 'vulnerable' because "
+    "it runs as a plain local subprocess importing glc directly — the same process as the code it's "
+    "attacking, by construction. It cannot observe an adapter container from outside it. Verified "
+    "instead with a throwaway probe Function sharing the adapter image's exact shape: no /data mount "
+    "exists there at all, so this call has nothing real to reach for AR3. Still fully effective for "
+    "AR4 (code execution inside the gateway's own container, which does have the real mount) — see "
+    "FINDINGS.md, closing that needs a further split of the gateway's own trusted internals."
+)
 
 CHECKS: list[Check] = [
     _make(
@@ -222,6 +260,8 @@ CHECKS: list[Check] = [
         _L1_SNIPPET,
         "T1.11/T1.12",
         "AR3",
+        fix_summary=_CONTAINER_ISOLATION_FIX,
+        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
     ),
     _make(
         "L2",
@@ -231,6 +271,13 @@ CHECKS: list[Check] = [
         _L2_SNIPPET,
         "T1.14",
         "AR4",
+        fix_summary=(
+            "glc/audit/store.py adds hash-chaining: every row stores hash = sha256(prev_hash + "
+            "canonical_json(row)), and verify_chain() walks the table to report the first row where "
+            "content or chain linkage no longer matches. A direct SQLite DELETE/UPDATE is now detected "
+            "— but not prevented, and deleting the tail (or the whole table) isn't detected either, "
+            "since there's no later row left to contradict it. Mitigated, not closed."
+        ),
     ),
     _make(
         "L3",
@@ -240,6 +287,8 @@ CHECKS: list[Check] = [
         _L3_SNIPPET,
         "T1.11/T1.12",
         "AR4",
+        fix_summary=_CONTAINER_ISOLATION_FIX,
+        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
     ),
     _make(
         "L4",
@@ -250,6 +299,8 @@ CHECKS: list[Check] = [
         _L4_SNIPPET,
         "T1.11/T1.12",
         "AR4",
+        fix_summary=_CONTAINER_ISOLATION_FIX,
+        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
     ),
     _make(
         "L5",
@@ -259,6 +310,16 @@ CHECKS: list[Check] = [
         _L5_SNIPPET,
         "T1.11/T1.12",
         "AR4",
+        fix_summary=(
+            "glc/policy/engine.py now blocks the exact one-liner this finding names: PolicyEngine gets "
+            "__slots__ (blocks instance-level `some_engine.evaluate = ...`), and the module's __class__ "
+            "is swapped to a types.ModuleType subclass whose __setattr__ rejects external reassignment "
+            "of evaluate/get_engine/reload_engine. Mitigated, not closed: the identical outcome is one "
+            "line away via sys.modules['glc.policy.engine'].__dict__['evaluate'] = ..., which bypasses "
+            "__setattr__ entirely and is exactly as easy for the same AR4 attacker. The separated "
+            "glc-policy-engine Modal Function (glc/policy/remote.py's evaluate_remote()) is immune to "
+            "both techniques and verified live, but nothing calls it yet."
+        ),
     ),
     _make(
         "L8",
@@ -269,6 +330,10 @@ CHECKS: list[Check] = [
         _L8_SNIPPET,
         "T1.11/T1.12",
         "AR4",
+        fix_summary=_CONTAINER_ISOLATION_FIX
+        + " Each adapter container also has its own private PID namespace, so os.kill(os.getpid(), "
+        "SIGTERM) inside it can only ever kill that container's own process, never the gateway's.",
+        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3 by construction (separate PID namespace), not by this check.",
     ),
     _make(
         "L10",
@@ -278,5 +343,12 @@ CHECKS: list[Check] = [
         _L10_SNIPPET,
         "T1.15",
         "AR4",
+        fix_summary=(
+            "glc/db.py adds MAX_TOKENS_PER_CALL=2_000_000 and log_call() now raises ValueError for "
+            "negative values or values above that ceiling, before the INSERT runs. Mitigated, not "
+            "closed: the fix bounds the values accepted, but any in-process caller (not just the "
+            "trusted core) can still call log_call() at all — full closure needs Move B (only the "
+            "trusted core process should ever call it)."
+        ),
     ),
 ]

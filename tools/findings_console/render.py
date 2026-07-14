@@ -13,6 +13,7 @@ from tools.findings_console.models import (
     INVARIANT_DESCRIPTIONS,
     KIND_DESCRIPTIONS,
     KIND_LABELS,
+    VERDICT_DESCRIPTIONS,
     Check,
     Target,
     Verdict,
@@ -159,6 +160,20 @@ _STYLE = """
   .compare-summary { color: var(--text); font-size: .86rem; }
   .compare-empty { color: var(--text-faint); font-size: .82rem; font-style: italic; }
 
+  /* Attack command / fix boxes on the check detail page */
+  .box-label { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+               color: var(--text-muted); margin: 0 0 var(--sp-2); display: flex; align-items: center; gap: .4rem; }
+  .box-label .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .command-box { background: var(--bg-sunken); border: 1px solid var(--border-strong);
+                 border-left: 3px solid var(--danger); border-radius: var(--radius); padding: var(--sp-4);
+                 margin-bottom: var(--sp-4); }
+  .command-box pre { margin: 0; max-height: 360px; background: transparent; border: none; padding: 0;
+                      color: var(--text); font-size: .8rem; }
+  .fix-box { background: var(--bg-raised); border: 1px solid var(--border-strong);
+             border-left: 3px solid var(--success); border-radius: var(--radius); padding: var(--sp-4);
+             margin-bottom: var(--sp-4); }
+  .fix-box p { margin: 0; color: var(--text); font-size: .85rem; line-height: 1.65; }
+
   /* Reference legend */
   .legend-group { margin-bottom: var(--sp-5); }
   .legend-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-3); }
@@ -212,18 +227,29 @@ def _page(title: str, body: str) -> str:
 
 
 def target_form(target: Target) -> str:
+    needs_url = not target.base_url or "localhost" in target.base_url or "127.0.0.1" in target.base_url
+    warning = ""
+    if needs_url:
+        warning = (
+            '<p class="meta" style="margin:0 0 var(--sp-3);color:#fca5a5">'
+            "No deployed Modal URL configured yet — paste your <code>*.modal.run</code> base URL below "
+            "(printed by <code>modal deploy modal_app.py</code>) and Set target. Only the deployed "
+            "gateway is what this assignment is actually testing."
+            "</p>"
+        )
     return f"""
 <form class="panel" method="post" action="/api/target">
-  <h3>Target</h3>
-  <p class="meta" style="margin:0 0 var(--sp-3)">HTTP and WebSocket checks run against this. In-process and static checks always run locally, regardless of this setting.</p>
+  <h3>Target — your deployed Modal gateway</h3>
+  <p class="meta" style="margin:0 0 var(--sp-3)">HTTP and WebSocket checks run against this URL. In-process and static checks never use it — they inspect this local checkout / run a throwaway local subprocess by design, to demonstrate code that runs inside the gateway's own process (see the "Check kinds" legend below).</p>
+  {warning}
   <div class="form-row">
     <div>
       <label for="target-name">Name</label>
       <input id="target-name" type="text" name="name" value="{e(target.name)}">
     </div>
     <div>
-      <label for="target-url">Base URL</label>
-      <input id="target-url" type="text" name="base_url" value="{e(target.base_url)}">
+      <label for="target-url">Base URL (your *.modal.run URL)</label>
+      <input id="target-url" type="text" name="base_url" value="{e(target.base_url)}" placeholder="https://your-workspace--glc-v1-gateway-fastapi-app.modal.run">
     </div>
     <div>
       <label for="target-token">Install token</label>
@@ -284,8 +310,10 @@ def _legend_group(title: str, rows: list[tuple[str, str]]) -> str:
 
 def _legend_tables() -> str:
     kind_rows = [(KIND_LABELS[k], desc) for k, desc in KIND_DESCRIPTIONS.items()]
+    verdict_rows = [(v.upper(), desc) for v, desc in VERDICT_DESCRIPTIONS.items()]
     return f"""
     <h2 class="section-heading">Reference</h2>
+    {_legend_group("Verdict codes — closed vs. mitigated", verdict_rows)}
     {_legend_group("Invariant codes", list(INVARIANT_DESCRIPTIONS.items()))}
     {_legend_group("Attacker role codes", list(ATTACKER_ROLES.items()))}
     {_legend_group("Check kinds", kind_rows)}"""
@@ -312,10 +340,12 @@ def dashboard(
     status = f'<div class="panel notice">{e(gateway_note)}</div>' if gateway_note else ""
     body = f"""
     <h1>GLC v2 - Findings Console</h1>
-    <p class="lede">This is a local-only testing dashboard. Findings are grouped by what the migration
-    did to each one: introduced by the move to Modal, inherited but not yet closed, or inherited and now
-    reachable over the internet. Every run is logged and kept. Nothing runs automatically here. Click Run
-    on a row, or Run all checks, whenever you are ready.</p>
+    <p class="lede">The dashboard itself runs locally, but every HTTP/WS check below fires at your
+    <b>deployed Modal gateway</b> — set its URL below. Findings are grouped by what the migration did to
+    each one: introduced by the move to Modal, inherited but not yet closed, or inherited and now
+    reachable over the internet. Every run is logged and kept, with an "Attack command" box and a "How
+    this is fixed" box on each check's own page. Nothing runs automatically here. Click Run on a row, or
+    Run all checks, whenever you are ready.</p>
     {status}
     {target_form(target)}
     <div class="actions">{actions}</div>
@@ -406,10 +436,38 @@ def _history_row(r: dict, check_id: str, pinned_by_target: dict[str, int]) -> st
         <td>{e(target_name)}</td><td>{e(r["summary"])}</td><td>{commit_cell}</td><td>{action}</td></tr>"""
 
 
+def _resolve_command(command: str, target: Target) -> str:
+    """Substitute the two placeholders against the currently configured
+    target. Plain string replace, not str.format — these commands
+    routinely contain literal {braces} in JSON bodies."""
+    token = target.install_token or "<INSTALL_TOKEN>"
+    return command.replace("__BASE_URL__", target.base_url).replace("__TOKEN__", token)
+
+
+def _command_box(check: Check, target: Target) -> str:
+    if not check.command:
+        return ""
+    resolved = _resolve_command(check.command, target)
+    return f"""<div class="command-box">
+      <div class="box-label"><span class="dot" style="background:var(--danger)"></span>Attack command — how this was actually run</div>
+      <pre>{e(resolved)}</pre>
+    </div>"""
+
+
+def _fix_box(check: Check) -> str:
+    if not check.fix_summary:
+        return ""
+    return f"""<div class="fix-box">
+      <div class="box-label"><span class="dot" style="background:var(--success)"></span>How this is fixed</div>
+      <p>{e(check.fix_summary)}</p>
+    </div>"""
+
+
 def check_detail(
     check: Check,
     history: list[dict],
     per_target: list[tuple[str, dict | None, dict | None, int | None]],
+    target: Target,
 ) -> str:
     if per_target:
         before_after = "".join(
@@ -450,6 +508,8 @@ def check_detail(
     <h1>{e(check.id)} - {e(check.title)}</h1>
     {detail_list}
     <div class="panel">{e(check.description)}{f"<br><br><i>{e(check.notes)}</i>" if check.notes else ""}</div>
+    {_command_box(check, target)}
+    {_fix_box(check)}
     <div class="actions">
       <form method="post" action="/api/run/{e(check.id)}">
         <button type="submit" class="primary">Run now against current target</button>

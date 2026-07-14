@@ -3,34 +3,37 @@
 Run with:
     uv run python -m tools.findings_console.server
 
-Detects (or spawns) a gateway on 127.0.0.1:8111 and resolves its
-install token so the target form opens pre-filled — then serves the
-dashboard on 127.0.0.1:8811. Nothing runs until you click Run or Run
-all checks yourself; there is no automatic run-on-startup.
+Serves the dashboard on 127.0.0.1:8811. Nothing runs until you click
+Run or Run all checks yourself; there is no automatic run-on-startup.
 
-Serves on 127.0.0.1:8811 by default (distinct from glc's own 8111) so
-it never collides with a locally running gateway. Never deploy this —
-it has no auth of its own and isn't meant to be reachable by anyone
-but you, on your own machine.
+Only your deployed Modal gateway is a valid target for the HTTP/WS
+checks — this assignment is about the deployed app, not a local `uv
+run glc serve` stand-in, so there is no local-gateway autostart or
+"local" target option here. On first launch (or if GLC_MODAL_URL
+isn't set), the target form starts empty and prompts you to paste your
+`*.modal.run` URL. In-process and static checks never use the target
+at all; they always run a local subprocess / read this local checkout,
+by design (see the "Check kinds" legend on the dashboard).
+
+Never deploy this console itself — it has no auth of its own and
+isn't meant to be reachable by anyone but you, on your own machine.
 
 Environment variables:
-    FINDINGS_CONSOLE_AUTOSTART_GATEWAY=0   don't detect/spawn a gateway at all
-    FINDINGS_CONSOLE_DB=<path>             override the SQLite log location
-    FINDINGS_CONSOLE_FORCE_PORTS=0         don't force-kill stale processes on 8111/8811
+    GLC_MODAL_URL=<url>             pre-fill the target's base_url with your deployed *.modal.run URL
+    GLC_MODAL_INSTALL_TOKEN=<token> pre-fill the target's install_token
+    FINDINGS_CONSOLE_DB=<path>      override the SQLite log location
+    FINDINGS_CONSOLE_FORCE_PORTS=0  don't force-kill a stale console process on 8811
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import platform
 import subprocess
-import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
@@ -40,8 +43,6 @@ from tools.findings_console.models import Target
 from tools.findings_console.registry import ordered_checks
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-GATEWAY_URL = "http://127.0.0.1:8111"
-SCRATCH_GLC_DIR = REPO_ROOT / ".findings_console" / "glc-scratch"
 
 
 def _pids_listening_on(port: int) -> list[int]:
@@ -105,11 +106,19 @@ def _free_port(port: int) -> list[int]:
     return killed
 
 
+def _initial_target() -> Target:
+    """Prefer whatever the operator already told us about their deployed
+    Modal gateway (env vars set once in the shell, or in .env); otherwise
+    start empty and let the target form's own warning prompt for it."""
+    base_url = os.getenv("GLC_MODAL_URL", "")
+    token = os.getenv("GLC_MODAL_INSTALL_TOKEN") or None
+    return Target(name="modal", base_url=base_url, install_token=token)
+
+
 _state: dict[str, object] = {
-    "target": Target(name="local", base_url=GATEWAY_URL, install_token=None),
+    "target": _initial_target(),
     "gateway_note": "",
 }
-_owned_gateway_proc: subprocess.Popen | None = None
 
 
 def _current_target() -> Target:
@@ -118,95 +127,15 @@ def _current_target() -> Target:
     return target
 
 
-async def _gateway_healthy(client: httpx.AsyncClient) -> bool:
-    try:
-        r = await client.get(f"{GATEWAY_URL}/healthz", timeout=2)
-        return r.status_code == 200
-    except httpx.HTTPError:
-        return False
-
-
-async def _wait_for_gateway(client: httpx.AsyncClient, timeout_s: float) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if await _gateway_healthy(client):
-            return True
-        await asyncio.sleep(1)
-    return False
-
-
-def _resolve_token(config_dir: Path) -> str | None:
-    p = config_dir / "install_token"
-    if p.exists():
-        return p.read_text().strip() or None
-    return None
-
-
-async def _ensure_gateway_and_token() -> None:
-    """Detect an already-running gateway and reuse it, or spawn a
-    disposable scratch instance. Either way, populate _state['target']
-    with a working install_token so the dashboard opens ready to go."""
-    global _owned_gateway_proc
-
-    if os.getenv("FINDINGS_CONSOLE_AUTOSTART_GATEWAY", "1") == "0":
-        _state["gateway_note"] = (
-            "auto-start disabled (FINDINGS_CONSOLE_AUTOSTART_GATEWAY=0) — set a target yourself"
-        )
-        return
-
-    async with httpx.AsyncClient() as client:
-        if await _gateway_healthy(client):
-            # Something is already listening on 8111 — almost certainly a
-            # `uv run glc serve` the operator started themselves, testing
-            # their own fixes. Reuse it; don't spawn a second one, and
-            # don't touch its state beyond reading its token.
-            config_dir = Path(os.getenv("GLC_CONFIG_DIR", os.path.expanduser("~/.glc")))
-            token = _resolve_token(config_dir)
-            _state["gateway_note"] = (
-                f"found an existing gateway already running at {GATEWAY_URL} — reusing it"
-                + (
-                    ""
-                    if token
-                    else f" (no install_token found at {config_dir}/install_token — set one manually)"
-                )
-            )
-        else:
-            print(f"[findings-console] no gateway at {GATEWAY_URL} — starting a scratch instance...")
-            _free_port(8111)  # clear out any stale, unresponsive process squatting the port
-            SCRATCH_GLC_DIR.mkdir(parents=True, exist_ok=True)
-            env = dict(os.environ)
-            env["GLC_CONFIG_DIR"] = str(SCRATCH_GLC_DIR)
-            env.setdefault("GEMINI_API_KEY", "mock-not-real")
-            _owned_gateway_proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    "import uvicorn; uvicorn.run('glc.main:app', host='127.0.0.1', port=8111)",
-                ],
-                cwd=str(REPO_ROOT),
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            healthy = await _wait_for_gateway(client, timeout_s=30)
-            if not healthy:
-                _state["gateway_note"] = (
-                    "tried to start a scratch gateway but it never became healthy — check the console's own stdout"
-                )
-                return
-            token = _resolve_token(SCRATCH_GLC_DIR)
-            _state["gateway_note"] = f"started a disposable scratch gateway at {GATEWAY_URL}"
-
-    _state["target"] = Target(name="local", base_url=GATEWAY_URL, install_token=token)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init_db()
-    await _ensure_gateway_and_token()
+    if not _current_target().base_url:
+        _state["gateway_note"] = (
+            "no Modal target configured yet — deploy with `modal deploy modal_app.py`, then paste the "
+            "printed *.modal.run URL into the target form below and click Set target"
+        )
     yield
-    if _owned_gateway_proc is not None:
-        _owned_gateway_proc.terminate()
 
 
 app = FastAPI(title="GLC v2 Findings Console", lifespan=lifespan)
@@ -254,7 +183,7 @@ async def check_detail(check_id: str) -> HTMLResponse:
         )
         for name in store.targets_for_check(check_id)
     ]
-    return HTMLResponse(render.check_detail(check, hist, per_target))
+    return HTMLResponse(render.check_detail(check, hist, per_target, _current_target()))
 
 
 @app.post("/api/pin/{check_id}")

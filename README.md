@@ -297,29 +297,49 @@ the manual curl/WebSocket/in-process repro for all 22 findings above. It
 is never deployed to Modal, has no auth of its own, and should only ever
 be reached at `127.0.0.1`.
 
-**Start it** from the repo root:
+**Only your deployed Modal gateway is a valid target** — there is no
+local-gateway option. This assignment hardens the deployed app, and most
+of these findings (A3–A4, L1, L3–L5, L8) are specifically about
+container/Secret separation that a local `uv run glc serve` process
+can't exercise at all.
+
+**Start it** from the repo root, after you've deployed and fetched your
+install token (see above):
 
 ```bash
+GLC_MODAL_URL=<your *.modal.run URL> \
+GLC_MODAL_INSTALL_TOKEN=$(cat modal-install-token.txt) \
 uv run python -m tools.findings_console.server
 ```
 
-This looks for a gateway already running at `http://127.0.0.1:8111` and
-reuses it; if none is found, it starts a disposable scratch gateway of
-its own (isolated config under `.findings_console/glc-scratch/`, gitignored,
-separate from your real `~/.glc`), resolves its install token
-automatically, and serves the dashboard at `http://127.0.0.1:8811`.
+(Omit the env vars and paste the URL/token into the target form instead,
+if you'd rather.) Serves the dashboard at `http://127.0.0.1:8811`.
 
 **Using it:**
 
 - Every check starts as `no runs` — nothing runs on its own. Click **Run**
   on a row to fire one check, or **Run all checks** to fire every check
   in one pass (this can take up to a minute — the SSRF and rate-limit
-  checks fire multiple slow requests).
+  checks fire multiple slow requests against your live deployment).
 - Hover any `INV-n`, `ARn`, or check-kind label for its full meaning; a
-  legend at the bottom of the dashboard spells all of them out too.
+  legend at the bottom of the dashboard spells all of them out too,
+  including a **Verdict codes** legend that defines `closed` vs.
+  `mitigated` precisely (see below).
 - Each run is classified `vulnerable`, `mitigated`, `closed`, `manual`
   (needs something the tool can't supply, usually an install token), or
   `error` (the check itself failed to run — not a verdict on the finding).
+  **`closed`** means the check directly confirmed the demonstrated attack
+  now fails, unconditionally, for the attacker role it names — a
+  *stronger* role it doesn't exercise may still have a route (check
+  `FINDINGS.md`). **`mitigated`** means either the attack (or an
+  equally-easy alternate route to the same outcome) still succeeds but
+  the check verified real progress (reduced impact, or the tamper is now
+  detected), or the check is a heuristic that can't fully confirm closure
+  on its own.
+- Every check's own page (`/check/<id>`) has an **Attack command** box —
+  the literal `curl`/Python that reproduces it, with your target's URL
+  and token already filled in — and a **How this is fixed** box naming
+  the actual file and mechanism.
 - Click into any check to see, per target, the earliest recorded run next
   to the latest — a before/after comparison. Pin a specific run as the
   baseline if the true "before" state wasn't the first attempt.
@@ -331,19 +351,11 @@ automatically, and serves the dashboard at `http://127.0.0.1:8811`.
   once a check reaches `closed` or `mitigated` you can see exactly which
   commit fixed it.
 
-**Testing against your Modal deployment** (rather than local dev): once
-deployed, add it as a second target through the dashboard's target form —
-`name`, `base_url` (your `*.modal.run` URL), and the install token
-fetched from the Volume as shown above. Each target's history and
-before/after view stays completely independent — a fix verified locally
-never makes a still-vulnerable Modal deployment look fixed, and vice
-versa.
-
 **What each check kind actually exercises:**
 
 | Kind | Runs against | Findings | Notes |
 |---|---|---|---|
-| `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | local dev or deployed gateway |
+| `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | your deployed `*.modal.run` gateway |
 | `ws` | `target.base_url` | C2 (=L9), C3 | same, over WebSocket |
 | `inprocess` | your local checkout only | L1, L2, L3, L4, L5, L8, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
 | `static` | your local checkout only | A3, A4, A5, A6, L6, L7 | reads `modal_app.py`/source files directly; ignores `base_url` |
@@ -357,26 +369,29 @@ directory. If you've fixed the code but not redeployed, these can show
 **Known limitations of the dashboard** (found by actually running it
 against a live gateway):
 
-- L1, L3, L4, L5, L8 will *always* report `vulnerable` locally — but
-  for two genuinely different reasons, and only four of the five are a
-  tooling limitation. L1/L3/L4/L8: the checks run in-process on your
-  own machine, and a local subprocess can't observe whether your
-  deployed adapter containers are actually separated — those four are
-  genuinely closed for an adapter-container-level attacker in the live
-  deployment (verified directly against Modal — see `FINDINGS.md`);
-  this dashboard just can't see that from a local run. **L5 is
-  different: its `vulnerable` result is correct, not a limitation.**
-  The check monkey-patches `glc.policy.engine.evaluate` and calls that
-  exact function again — and it's still tampered, because that
-  function was never modified. A separated, un-monkey-patchable
-  alternative (`glc-policy-engine`) exists and is deployed, but nothing
-  calls it, so the original exploit still fully succeeds against the
-  original function, deployed or not. Don't mark L5 `closed` manually
-  the way you would L1/L3/L4/L8 — see its `FINDINGS.md` entry.
-  L1/L3/L4/L8 remain open for an attacker with code execution inside
-  the gateway process itself, since that process still holds the real
-  Volume-backed data those four protect — a different, harder rung
-  than what container separation alone defends.
+- L1, L3, L4, L8 will *always* report `vulnerable` from this console —
+  the checks run in-process on your own machine, and a local subprocess
+  can't observe whether your deployed adapter containers are actually
+  separated. Those four are genuinely closed for an adapter-container-
+  level attacker in the live deployment (verified directly against Modal
+  — see `FINDINGS.md`); this dashboard just can't see that from a local
+  run. Each check's own "How this is fixed" box explains this.
+- **L5 reports `mitigated`, not `vulnerable`, once `glc/policy/engine.py`'s
+  hardening is deployed.** The exact one-liner the finding names
+  (`glc.policy.engine.evaluate = lambda ...`) now raises `AttributeError`
+  — `PolicyEngine` gets `__slots__` and the module's `__class__` is
+  swapped to reject external reassignment of `evaluate`/`get_engine`/
+  `reload_engine`. Still not `closed`: the identical outcome is one line
+  away via `sys.modules['glc.policy.engine'].__dict__['evaluate'] = ...`,
+  which bypasses that check entirely and is exactly as easy for the same
+  attacker. The separated, un-monkey-patchable `glc-policy-engine`
+  Function is immune to both techniques and deployed, but nothing calls
+  it yet — see its `FINDINGS.md` entry.
+  L1/L3/L4/L8/L5 all remain open for an attacker with code execution
+  inside the gateway process itself, since that process still holds the
+  real Volume-backed data (or, for L5, the same module) those checks
+  protect — a different, harder rung than what container separation or
+  a `__setattr__` guard alone defends.
 - C4 (verbose errors) under-reports as `closed` if the target has zero
   provider keys configured — set at least one mock key so a real
   upstream attempt actually happens.
@@ -385,9 +400,9 @@ against a live gateway):
   yourself too.
 - C2/L9 requires both the route channel and the spoofed channel to be
   `enabled: true` in `channels.yaml`.
-- C5 fires up to 35 rapid requests and C6 up to 20 — prefer running these
-  against local dev rather than a live Modal deployment unless you
-  specifically want to confirm the deployment's own behavior.
+- C5 fires up to 35 rapid requests and C6 up to 20 — against your real
+  deployed gateway, since that's the only target this console has. Expect
+  this to briefly drive real (if tiny) usage.
 - **Checks can trip each other's global rate limits/lockouts in a single
   `Run all checks` pass.** C5's data-plane limiter and C6's pairing-confirm
   lockout are both global (see their own caveats above), not per-check —
@@ -397,11 +412,10 @@ against a live gateway):
   correctly, surfacing as `error` rather than `closed`. This isn't a bug
   in the fix — re-run the affected check by itself once the lockout
   window (5 minutes) has passed, or run checks individually instead of
-  all at once against a live deployment.
+  all at once.
 
-Stop the console with **Ctrl+C** so its shutdown hook can also terminate
-the scratch gateway it may have spawned; a force-kill leaves both
-orphaned on ports 8111/8811.
+Stop the console with **Ctrl+C** — a force-kill just leaves port 8811
+bound until the next startup's port-guard clears it.
 
 ## Repository layout
 

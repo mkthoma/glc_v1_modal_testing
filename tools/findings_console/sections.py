@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from tools.findings_console.models import Check
 
 GROUP_A_TITLE = "A. Introduced or elevated by the migration (the highest-value class here)"
-GROUP_B_TITLE = "B. Inherited in-process leaks the migration did NOT close (all still live)"
+GROUP_B_TITLE = (
+    "B. Inherited in-process leaks (closed/mitigated status varies by attacker role — open each check)"
+)
 GROUP_C_TITLE = "C. Inherited endpoint/logic issues, now internet-reachable"
 TEN_LEAKS_TITLE = "The ten code leaks the migration leaves open"
 

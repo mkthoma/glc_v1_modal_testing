@@ -2,7 +2,7 @@
 
 Each check is a synchronous function (the server runs these off the
 event loop via a thread pool) that hits `target.base_url` directly —
-your local `uv run glc serve` instance or your deployed Modal URL.
+your deployed Modal gateway's `*.modal.run` URL.
 """
 
 from __future__ import annotations
@@ -274,6 +274,17 @@ CHECKS: list[Check] = [
         _check_a1,
         "T1.1",
         attacker_role="AR1",
+        command=(
+            "curl -s -o /dev/null -w '%{http_code}\\n' -X POST __BASE_URL__/v1/chat \\\n"
+            '  -H "Content-Type: application/json" \\\n'
+            '  -d \'{"messages":[{"role":"user","content":"probe"}]}\''
+        ),
+        fix_summary=(
+            "glc/security/auth.py adds require_data_plane_token, a FastAPI dependency using "
+            "hmac.compare_digest against the install token. Wired via Depends(...) on /v1/chat, "
+            "/chat/batch, /vision, /embed in glc/routes/chat.py (and transcribe.py, speak.py). "
+            "Now returns 401 before reaching provider dispatch."
+        ),
     ),
     Check(
         "A2",
@@ -284,6 +295,17 @@ CHECKS: list[Check] = [
         _check_a2,
         "T1.2",
         attacker_role="AR1",
+        command=(
+            "for p in /v1/status /v1/providers /v1/capabilities /v1/cost/by_agent /v1/calls; do\n"
+            '  curl -s -o /dev/null -w "%{http_code} $p\\n" __BASE_URL__$p\n'
+            "done\n"
+            "curl -s -o /dev/null -w '%{http_code} /openapi.json\\n' __BASE_URL__/openapi.json"
+        ),
+        fix_summary=(
+            "Same require_data_plane_token dependency (A1) applied to all seven read endpoints in "
+            "glc/routes/chat.py. glc/main.py sets docs_url/redoc_url/openapi_url to None when "
+            "GLC_ENV=production (set on the Modal image), so /docs and /openapi.json return 404."
+        ),
     ),
     Check(
         "C1",
@@ -295,6 +317,20 @@ CHECKS: list[Check] = [
         "T1.5",
         notes="Heuristic, not a network-level oracle — read the evidence yourself too.",
         attacker_role="AR1",
+        command=(
+            "curl -s -X POST __BASE_URL__/v1/chat \\\n"
+            '  -H "Content-Type: application/json" -H "Authorization: Bearer __TOKEN__" \\\n'
+            '  -d \'{"messages":[{"role":"user","content":['
+            '{"type":"text","text":"probe"},'
+            '{"type":"image_url","image_url":{"url":"http://169.254.169.254/latest/meta-data/"}}'
+            "]}]}'"
+        ),
+        fix_summary=(
+            "glc/routes/chat.py's _resolve_image_urls/_fetch_to_data_url add _is_blocked_image_host() "
+            "and a manual redirect-walk that rejects link-local/loopback/metadata addresses (and any "
+            "redirect chain landing on one) before fetching, returning a 400 whose body includes the "
+            "word 'block'."
+        ),
     ),
     Check(
         "C4",
@@ -308,17 +344,42 @@ CHECKS: list[Check] = [
         "is even attempted, so there's nothing to leak. Set at least one mock provider key "
         "(e.g. GEMINI_API_KEY=mock-not-real) on the target so a real upstream attempt happens.",
         attacker_role="AR1",
+        command=(
+            "curl -s -X POST __BASE_URL__/v1/chat \\\n"
+            '  -H "Content-Type: application/json" -H "Authorization: Bearer __TOKEN__" \\\n'
+            '  -d \'{"messages":[{"role":"user","content":"probe"}],"model":"findings-console-invalid-model"}\''
+        ),
+        fix_summary=(
+            "glc/routes/chat.py adds logger = logging.getLogger('glc.chat') and replaces error bodies "
+            "returned to the client with a generic message; the provider hostname/traceback detail now "
+            "only goes to the server-side log, never the HTTP response."
+        ),
     ),
     Check(
         "C5",
         "No rate limits on data plane",
         "INV-8",
         CheckKind.HTTP,
-        "Fire 15 rapid POST /v1/chat and check for a 429.",
+        "Fire 35 rapid POST /v1/chat and check for a 429.",
         _check_c5,
         "T1.4",
-        notes="Against a live remote target this actually invokes /v1/chat up to 15 times — prefer running this one against your local dev server.",
+        notes="Fires up to 35 real requests against whatever target is configured — against the live "
+        "Modal deployment this briefly drives real (if tiny) usage. That's expected: only the deployed "
+        "gateway is the thing actually being graded, so this has to run against it, not a substitute.",
         attacker_role="AR1",
+        command=(
+            "for i in $(seq 1 35); do\n"
+            '  curl -s -o /dev/null -w "%{http_code}\\n" -X POST __BASE_URL__/v1/chat \\\n'
+            '    -H "Content-Type: application/json" -H "Authorization: Bearer __TOKEN__" \\\n'
+            '    -d \'{"messages":[{"role":"user","content":"probe"}]}\'\n'
+            "done"
+        ),
+        fix_summary=(
+            "glc/security/rate_limits.py adds DATA_PLANE_CHANNEL/DATA_PLANE_USER buckets and "
+            "check_data_plane_rate_limit(); glc/routes/chat.py calls it (plus a daily budget cap via "
+            "_enforce_data_plane_limits()/_today_spend_usd()) before dispatching to a provider, "
+            "returning 429 once the per-minute limit is exceeded."
+        ),
     ),
     Check(
         "C6",
@@ -331,5 +392,18 @@ CHECKS: list[Check] = [
         notes="Currently token-gated end-to-end in this codebase, so the realistic actor is someone who "
         "already holds the install token, not an anonymous outsider — see PLAN.md T1.8.",
         attacker_role="AR4",
+        command=(
+            'curl -s -X POST __BASE_URL__/v1/control/pair -H "Authorization: Bearer __TOKEN__" \\\n'
+            '  -d \'{"channel":"probe","channel_user_id":"attacker"}\'\n'
+            "for i in $(seq -w 0 19); do\n"
+            "  curl -s -X POST __BASE_URL__/v1/control/pair/confirm \\\n"
+            '    -H "Authorization: Bearer __TOKEN__" -d "{\\"code\\":\\"$i\\"}"\n'
+            "done"
+        ),
+        fix_summary=(
+            "glc/security/pairing.py adds CONFIRM_ATTEMPT_LIMIT=10 over a 5-minute window and a "
+            "PairingLockedOut exception; glc/routes/control.py's pair_confirm route catches it and "
+            "returns a lockout response once the limit is hit, instead of allowing unlimited guesses."
+        ),
     ),
 ]
