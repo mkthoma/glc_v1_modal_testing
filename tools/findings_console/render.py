@@ -232,15 +232,16 @@ def target_form(target: Target) -> str:
     if needs_url:
         warning = (
             '<p class="meta" style="margin:0 0 var(--sp-3);color:#fca5a5">'
-            "No deployed Modal URL configured yet — paste your <code>*.modal.run</code> base URL below "
-            "(printed by <code>modal deploy modal_app.py</code>) and Set target. Only the deployed "
-            "gateway is what this assignment is actually testing."
+            "No deployed Modal URL configured yet. Click <b>Re-detect from modal_app.py</b> below once "
+            "you've run <code>modal deploy modal_app.py</code> — it reads the app/function/Volume names "
+            "straight out of that file and looks the rest up via the Modal SDK, no pasting required. "
+            "Only the deployed gateway is what this assignment is actually testing."
             "</p>"
         )
     return f"""
 <form class="panel" method="post" action="/api/target">
   <h3>Target — your deployed Modal gateway</h3>
-  <p class="meta" style="margin:0 0 var(--sp-3)">HTTP and WebSocket checks run against this URL. In-process and static checks never use it — they inspect this local checkout / run a throwaway local subprocess by design, to demonstrate code that runs inside the gateway's own process (see the "Check kinds" legend below).</p>
+  <p class="meta" style="margin:0 0 var(--sp-3)">HTTP and WebSocket checks run against this URL. In-process and static checks never use it — they inspect this local checkout / run a throwaway local subprocess by design, to demonstrate code that runs inside the gateway's own process (see the "Check kinds" legend below). Auto-detected from <code>modal_app.py</code> on startup — edit by hand only if you want to override that, e.g. to point at a different environment.</p>
   {warning}
   <div class="form-row">
     <div>
@@ -258,6 +259,10 @@ def target_form(target: Target) -> str:
     </div>
     <div><button type="submit" class="primary">Set target</button></div>
   </div>
+</form>
+<form method="post" action="/api/target/autodetect" style="margin:calc(-1 * var(--sp-4)) 0 var(--sp-5)">
+  <button type="submit">Re-detect from modal_app.py</button>
+  <span class="meta">Reads modal_app.py, looks up the deployed Function's URL and the Volume's install token, and overwrites both fields above — use after a fresh <code>modal deploy</code>.</span>
 </form>
 """
 

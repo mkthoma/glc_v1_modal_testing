@@ -270,8 +270,9 @@ Redeploy any time after a code change with the same `modal deploy`
 command — the Volume (audit log, pairing store, install token) survives
 redeploys; only the container image and code are refreshed.
 
-To fetch the install token for a Modal deployment (needed for
-token-gated checks — it's stored on the Volume, not on your machine):
+To fetch the install token by hand (e.g. to `curl` the deployed gateway
+directly) — it's stored on the Volume, not on your machine. The findings
+console below auto-detects this for you; this is only for manual use:
 
 ```bash
 uv run modal volume get glc-data glc/install_token ./modal-install-token.txt
@@ -303,17 +304,22 @@ of these findings (A3–A4, L1, L3–L5, L8) are specifically about
 container/Secret separation that a local `uv run glc serve` process
 can't exercise at all.
 
-**Start it** from the repo root, after you've deployed and fetched your
-install token (see above):
+**Start it** from the repo root, after you've deployed (`modal deploy modal_app.py`):
 
 ```bash
-GLC_MODAL_URL=<your *.modal.run URL> \
-GLC_MODAL_INSTALL_TOKEN=$(cat modal-install-token.txt) \
 uv run python -m tools.findings_console.server
 ```
 
-(Omit the env vars and paste the URL/token into the target form instead,
-if you'd rather.) Serves the dashboard at `http://127.0.0.1:8811`.
+Serves the dashboard at `http://127.0.0.1:8811`. **No copy-pasting a URL
+or token** — on startup the console parses `modal_app.py` for the App
+name, ASGI function name, Volume name, and config path, then asks the
+Modal SDK for that Function's live `*.modal.run` URL and reads the
+install token straight out of the Volume, using the same Modal auth you
+deployed with. If the app isn't deployed yet, the target form explains
+what's missing; click **Re-detect from modal_app.py** to retry once it
+is, or after a fresh redeploy. `GLC_MODAL_URL`/`GLC_MODAL_INSTALL_TOKEN`
+(or typing into the form) overrides auto-detection if you want to point
+somewhere else.
 
 **Using it:**
 

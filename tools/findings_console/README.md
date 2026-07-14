@@ -14,23 +14,13 @@ It is a testing tool, not part of the graded gateway. It is never deployed to Mo
    ```bash
    modal deploy modal_app.py
    ```
-   Modal prints your gateway's `*.modal.run` URL — copy it.
-2. Get the install token (it lives on the `glc-data` Volume, not your machine):
-   ```bash
-   uv run modal volume get glc-data glc/install_token ./modal-install-token.txt
-   cat ./modal-install-token.txt
-   ```
-3. Start the console:
+2. Start the console:
    ```bash
    uv run python -m tools.findings_console.server
    ```
-   Serves the dashboard on **http://127.0.0.1:8811**. To skip pasting the URL/token into the form every time, export them first so the target starts pre-filled:
-   ```bash
-   GLC_MODAL_URL=https://your-workspace--glc-v1-gateway-fastapi-app.modal.run \
-   GLC_MODAL_INSTALL_TOKEN=$(cat modal-install-token.txt) \
-   uv run python -m tools.findings_console.server
-   ```
-4. Open `http://127.0.0.1:8811`. If you didn't set the env vars above, paste the URL and token into the **Target** form and click **Set target** — the form itself warns you if no URL is configured yet.
+3. Open `http://127.0.0.1:8811`.
+
+That's it — **no copy-pasting a URL or token.** On startup, the console reads `modal_app.py` for the App name, the ASGI function name, the Volume name, and the configured data path, then asks the Modal SDK for that Function's live `*.modal.run` URL and reads the install token straight out of the Volume. This needs no `modal` CLI subprocess, just the same Modal auth (`modal token new` / `modal setup`) you already used to deploy. The dashboard's status panel says whether it worked; if the app isn't deployed yet or your local Modal auth isn't set up, the target form explains what's missing and a **Re-detect from modal_app.py** button is always there to retry once it is. Setting `GLC_MODAL_URL`/`GLC_MODAL_INSTALL_TOKEN` (or pasting into the form) overrides auto-detection, if you specifically want to point at something else.
 
 Every check starts as `no runs` — **nothing runs on its own.** Click **Run** on a row to fire one check, or **Run all checks** to fire every check against the current target in one pass (this one blocks the request until every check finishes — C1's SSRF probe and C5/C6's request bursts are the slow ones, so expect it to take up to a minute).
 
@@ -53,14 +43,14 @@ By default, every startup already force-kills whatever's listening on `8811` for
 
 | Variable | Default | Effect |
 |---|---|---|
-| `GLC_MODAL_URL` | unset | Pre-fills the target's `base_url` with your deployed `*.modal.run` URL on startup, so you don't paste it into the form every time. |
-| `GLC_MODAL_INSTALL_TOKEN` | unset | Pre-fills the target's `install_token` on startup. |
+| `GLC_MODAL_URL` | unset | Overrides auto-detection — set this if you specifically want the target's `base_url` to be something other than what `modal_app.py` + the Modal SDK resolve to. |
+| `GLC_MODAL_INSTALL_TOKEN` | unset | Same, for `install_token`. |
 | `FINDINGS_CONSOLE_DB` | `.findings_console/console.sqlite` | Override the SQLite log location. |
 | `FINDINGS_CONSOLE_FORCE_PORTS` | `1` | Set to `0` to stop the console from force-killing whatever's listening on `8811` before it binds (by default it shells out to `netstat`/`taskkill` or `lsof`/`kill` to clear a stale instance from a prior session that wasn't stopped with Ctrl+C). |
 
 ## What it does
 
-1. **Set a target** at the top of the dashboard — a name, your deployed `*.modal.run` **base URL**, and an `install_token` if you want to exercise the token-gated checks (C2, C3, C6). Pre-fill it via `GLC_MODAL_URL`/`GLC_MODAL_INSTALL_TOKEN` (see [Quick start](#quick-start)) or paste it in by hand.
+1. **Target auto-detection** — on startup, the console parses `modal_app.py` for the App name, ASGI function name, Volume name, and configured data path, then asks the Modal SDK for the deployed Function's `*.modal.run` URL and reads the install token out of the Volume directly (`tools/findings_console/modal_detect.py`). No `modal` CLI subprocess, no copy-pasting — it needs only the same Modal auth you used to deploy. Click **Re-detect from modal_app.py** any time (e.g. after a fresh `modal deploy`) to refresh both fields; `GLC_MODAL_URL`/`GLC_MODAL_INSTALL_TOKEN` or typing into the form overrides it.
 2. **Run checks** — click **Run** on any row to fire just that one check, or **Run all checks** to fire every check against the current target in one pass. Nothing runs on its own; every run is something you clicked.
 3. **Hover an invariant or attacker code for what it actually means** — `INV-2`, `AR1`, and the check's `kind` (`http`/`ws`/`inprocess`/`static`) are all shorthand. Every place one appears (the dashboard table, the check detail page) it's a native `<abbr title="...">` — hover it and the browser shows the full sentence, no JS needed. The dashboard table has a dedicated **Attacker** column for this. Compound invariant codes (`INV-2/INV-3`) and the one non-numbered label (`supply chain`, on A5) are handled too. A **legend** at the bottom of the dashboard spells out every invariant, attacker role, and check kind in one place if you'd rather not hover row by row — `ws` in particular ("WebSocket connection") is easy to misread as an abbreviation for something else at a glance, so it's shown as a full label everywhere, not just the raw code.
 4. **Read the verdict** — each run is classified as:
@@ -154,6 +144,6 @@ No new runtime dependency was needed beyond `python-multipart` (added as a **dev
 
 **The browser looks stuck/loading after clicking "Run all checks"** — expected, not stuck. The request blocks until every check finishes (C1's SSRF probe alone can take up to 35s, waiting past the gateway's own 30s internal fetch timeout; C5/C6 each fire multiple sequential requests). Give it up to a minute before assuming something's wrong; a single **Run** on one row is near-instant except for those same three checks.
 
-**Every check shows `manual`** — the target's `install_token` is empty or wrong. Double-check the token you downloaded from the Volume (see [Quick start](#quick-start)) matches what you pasted into the form or set via `GLC_MODAL_INSTALL_TOKEN`.
+**Every check shows `manual`** — the target's `install_token` is empty or wrong. Click **Re-detect from modal_app.py** to re-read it from the Volume; if that still comes up empty, check the dashboard's status panel for why (e.g. the Volume's `install_token` file doesn't exist yet — make one real request to the deployed gateway first, since it's written on first boot).
 
 **All 22 checks come back `error` immediately** — the target isn't reachable at all (wrong `base_url`, or the Modal deployment is asleep/misconfigured). Confirm with `curl <base_url>/healthz` yourself first.
