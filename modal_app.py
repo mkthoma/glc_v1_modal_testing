@@ -30,17 +30,37 @@ LOCAL_GLC = Path(__file__).parent / "glc"
 # --format='{{index .RepoDigests 0}}'` would produce) — re-resolve and
 # update this if you intentionally want to move to a newer base.
 #
+# Correction, found by checking rather than assuming: glc.config.CONFIG_DIR
+# is the only one of the four store paths that actually derives from
+# GLC_CONFIG_DIR. glc/audit/store.py, glc/security/pairing.py, and glc/db.py
+# each hardcode their OWN "~/.glc" default and only honor their own specific
+# env var (GLC_AUDIT_DB, GLC_PAIRING_DB, GLC_GATEWAY_DB respectively) — none
+# of which this file used to set. Only setting GLC_CONFIG_DIR (as the
+# original wrapper did) means install_token lands on the Volume correctly,
+# but audit.sqlite/pairings.sqlite/gateway.sqlite silently fall back to the
+# container's own ephemeral "~/.glc" and are wiped on every cold start —
+# verified directly: `modal volume ls glc-data glc` showed only
+# `glc/install_token`, never the other three files, despite the deployment
+# handling real traffic. All four stores now explicitly point at the Volume.
+GLC_DATA_ENV = {
+    "GLC_CONFIG_DIR": "/data/glc",
+    "GLC_AUDIT_DB": "/data/glc/audit.sqlite",
+    "GLC_PAIRING_DB": "/data/glc/pairings.sqlite",
+    "GLC_GATEWAY_DB": "/data/glc/gateway.sqlite",
+    "GLC_ENV": "production",
+}
+
 # The image = a pinned Linux box with Python 3.11, dependencies installed
 # by `uv sync --frozen` against this repo's own uv.lock (so the deployed
 # image can't drift from what's tested locally), the glc package copied
-# in, and GLC_CONFIG_DIR pointed at the Volume mount so all databases
+# in, and every store's path pointed at the Volume mount so all databases
 # land on persistent storage instead of the throwaway container filesystem.
 image = (
     modal.Image.from_registry(
         "python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3"
     )
     .uv_sync(extra_options="--no-dev")  # --no-dev: skip pytest/ruff/mypy, the lock is honored either way
-    .env({"GLC_CONFIG_DIR": "/data/glc", "GLC_ENV": "production"})
+    .env(GLC_DATA_ENV)
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 
@@ -82,12 +102,32 @@ llm_secret = modal.Secret.from_name("glc-llm-keys")
 # local_mic and webui need no external credential (local audio device /
 # local WS respectively) and get secret_name=None — no Secret attached,
 # nothing to scope.
+#
+# This also closes L3/L4 for an adapter-container-level attacker (AR3),
+# not just L1/A4: adapter_image() below deliberately does NOT set
+# GLC_CONFIG_DIR/GLC_AUDIT_DB/GLC_PAIRING_DB/GLC_GATEWAY_DB, and
+# make_adapter_functions() never mounts data_volume. So every module each
+# adapter's on_message()/send() imports (glc.security.pairing,
+# glc.config, glc.db) falls back to its own local, empty, throwaway
+# "~/.glc" inside that adapter's own container — completely disconnected
+# from the real pairings.sqlite/install_token/gateway.sqlite the core
+# gateway reads and writes on the Volume. force_pair_owner() called from
+# inside an adapter's container still runs (Python has no way to block
+# the call itself), but it only pollutes that adapter's own throwaway
+# file; it can never touch — and has no way to discover — the real
+# pairing data the gateway actually trusts. Likewise, install_token_path()
+# called from inside an adapter never resolves to the real token. This
+# doesn't close L3/L4 for AR4 (code execution inside the gateway process
+# itself, which does have the real files) — only for AR3, which is the
+# rung Move B/C's container boundary is meant to hold.
 
 
 def adapter_image(adapter_name: str) -> modal.Image:
     # `adapter_name` is unused today (every adapter shares the same base
     # image) but kept in the signature for per-adapter image tuning later
     # (e.g. an adapter needing extra system packages).
+    #
+    # Deliberately no .env(GLC_DATA_ENV) here — see the comment above.
     return (
         modal.Image.from_registry(
             "python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3"

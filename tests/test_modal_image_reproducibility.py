@@ -40,6 +40,45 @@ def test_gateway_function_is_single_writer():
     assert re.search(r"max_containers\s*=\s*1\b", src)
 
 
+def test_all_four_stores_point_at_the_volume():
+    """A6 correction, found by checking rather than assuming: only
+    glc.config.CONFIG_DIR derives from GLC_CONFIG_DIR. glc/audit/store.py,
+    glc/security/pairing.py, and glc/db.py each hardcode their own
+    "~/.glc" default and only honor their own specific env var
+    (GLC_AUDIT_DB, GLC_PAIRING_DB, GLC_GATEWAY_DB). Setting only
+    GLC_CONFIG_DIR (as an earlier version of this file did) means
+    audit.sqlite/pairings.sqlite/gateway.sqlite silently fall back to the
+    ephemeral container filesystem and never reach the Volume — verified
+    live: `modal volume ls glc-data glc` showed only `install_token`
+    despite real traffic. All four must be set explicitly."""
+    src = _source()
+    for env_var in ("GLC_CONFIG_DIR", "GLC_AUDIT_DB", "GLC_PAIRING_DB", "GLC_GATEWAY_DB"):
+        assert re.search(rf'"{env_var}"\s*:\s*"/data/', src), f"{env_var} is not pointed at the Volume"
+
+
+def test_adapter_image_does_not_set_any_data_store_env_var():
+    """L3/L4 — adapter_image() must NOT set GLC_CONFIG_DIR/GLC_AUDIT_DB/
+    GLC_PAIRING_DB/GLC_GATEWAY_DB, or an adapter's in-process call to
+    force_pair_owner()/install_token_path() would resolve to the same
+    paths the real gateway trusts instead of a disconnected local file."""
+    src = _source()
+    m = re.search(r"def adapter_image\(.*?\n\ndef ", src, re.DOTALL)
+    assert m, "could not locate adapter_image()'s body"
+    body = m.group(0)
+    for env_var in ("GLC_CONFIG_DIR", "GLC_AUDIT_DB", "GLC_PAIRING_DB", "GLC_GATEWAY_DB"):
+        assert env_var not in body, f"{env_var} must not appear in adapter_image()"
+
+
+def test_adapter_functions_never_mount_the_volume():
+    """L3/L4 — make_adapter_functions() must never pass volumes=, or an
+    adapter container could read/write the real pairing/audit/gateway
+    data on the shared Volume even without a matching env var."""
+    src = _source()
+    m = re.search(r"def make_adapter_functions\(.*?\n\n\n", src, re.DOTALL)
+    assert m, "could not locate make_adapter_functions()'s body"
+    assert "volumes=" not in m.group(0)
+
+
 ALL_CATALOGUE_ADAPTERS = [
     p.name
     for p in (Path(__file__).parent.parent / "glc" / "channels" / "catalogue").iterdir()

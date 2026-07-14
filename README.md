@@ -340,11 +340,17 @@ directory. If you've fixed the code but not redeployed, these can show
 against a live gateway):
 
 - L1, L3, L4, L5, L8 will *always* report `vulnerable` locally, even
-  after fixing them — they're structural leaks that only real
-  process/container separation closes, and a local subprocess can't
-  observe whether your deployed adapter containers are actually
-  separated. Mark these `closed` manually once container separation is
-  verified deployed.
+  after fixing them — the checks run in-process on your own machine,
+  and a local subprocess can't observe whether your deployed adapter
+  containers are actually separated. L1/L3/L4/L8 are genuinely closed
+  for an adapter-container-level attacker in the live deployment
+  (verified directly against Modal — see `FINDINGS.md`); this dashboard
+  just has no way to see that from a local run. L5 is the one exception
+  that's genuinely still open at every tier — see its `FINDINGS.md`
+  entry for why no mitigation is possible for it at all. All five
+  remain open for an attacker with code execution inside the gateway
+  process itself, which is a different, harder rung than what
+  container separation defends.
 - C4 (verbose errors) under-reports as `closed` if the target has zero
   provider keys configured — set at least one mock key so a real
   upstream attempt actually happens.

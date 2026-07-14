@@ -4,7 +4,7 @@ This is the required note: for each finding, the invariant it broke and the fix 
 
 Two things worth being upfront about, since they shape how "closed" is used below:
 
-- Only **C2/L9** (cross-channel envelope spoofing) is closable with a pure application-layer code change. **L1–L5, L7, L8, L10 fundamentally require process/container separation to be fully closed** — Python has no in-process ACL on `os.environ` or on importable functions, so the only real wall is a kernel-enforced process boundary. Of these, **L1 is now fully closed** (every catalogue adapter has its own container + Secret) and **L2, L7, L10 got a real Part-1-scope mitigation** (hash-chaining, an absolute binary path, input validation, respectively); **L3, L4, L5, L8 got none** — these aren't adapter leaks at all (they live in the core gateway's own security internals), so adapter separation doesn't touch them, and they're marked **open**, not mitigated, below. Don't take "mitigated" to mean every leak in this range has a corresponding fix; check each entry's own Status line.
+- Only **C2/L9** (cross-channel envelope spoofing) is closable with a pure application-layer code change. **L1–L5, L7, L8, L10 fundamentally require process/container separation to be fully closed** — Python has no in-process ACL on `os.environ` or on importable functions, so the only real wall is a kernel-enforced process boundary. Once Move B/C put every catalogue adapter in its own real container, that boundary actually exists now, and it closes more of these than an earlier draft of this file gave it credit for: **L1, L3, L4, L8 are fully closed for AR3** (an attacker who has compromised a single adapter container — verified live, not assumed) — **L2, L7, L10 got a real Part-1-scope mitigation** (hash-chaining, an absolute binary path, input validation) — and **only L5 remains genuinely, and deliberately, unfixed**, because it's the one leak the source material this plan is built from explicitly defers to "capstone scope," and because (unlike the others) no partial code-level mitigation is even possible for it — see L5's own entry for why. Every one of L1/L3/L4/L5/L8 remains open for AR4 (code execution inside the gateway process itself) — that rung requires a further split of the gateway's own trusted internals from its request-handling code, which is a materially bigger, different-shaped task than "every adapter gets a container" and is out of scope here. Check each entry's own Status line rather than assuming from this summary.
 - **A4 and L1 are the same underlying gap** (one shared Secret), described at the deployment-config level and the code-consequence level. **C2 and L9 are the literal same bug**, named twice.
 
 ## Section A — Introduced or elevated by the Modal migration
@@ -76,6 +76,8 @@ Two things worth being upfront about, since they shape how "closed" is used belo
 **Fix:** `max_containers=1` pinned on the core gateway Function. Commit: `harden: single-writer audit path (A6)`.
 **Re-verified:** redeployed live, `/healthz` still returns `{"ok": true}`.
 
+**A separate, more serious bug found while re-verifying L3/L4/L8 (not the same thing as the above):** `glc/audit/store.py`, `glc/security/pairing.py`, and `glc/db.py` each hardcode their own `~/.glc` default and only honor their own specific env var (`GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) — only `glc.config.CONFIG_DIR` actually derives from `GLC_CONFIG_DIR`. `modal_app.py` only ever set `GLC_CONFIG_DIR`, so `audit.sqlite`, `pairings.sqlite`, and `gateway.sqlite` were **never landing on the Volume at all** — they silently fell back to the container's own ephemeral filesystem and were wiped on every cold start. Confirmed directly: `modal volume ls glc-data glc` showed only `glc/install_token`, despite the deployment handling real traffic for the entire session. Fixed by explicitly setting all four paths (`GLC_CONFIG_DIR`, `GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) to `/data/glc/...` on the core gateway's image. **Re-verified: made a real request, confirmed `modal volume ls` now lists all four files; pulled `gateway.sqlite` locally, confirmed a `calls` row, redeployed, pulled it again, confirmed the same row survived the redeploy.**
+
 ## Section B/L — The ten in-process code leaks
 
 `L9` is a UI-only alias of `C2` (see Section C). `L6` is the same root cause as `A3`.
@@ -103,21 +105,31 @@ Same fix and verification as A4 above — this is A4's code-level consequence, c
 
 **Location:** `glc/security/pairing.py`'s `force_pair_owner()`
 **Invariant broken:** INV-2
-**Status:** open — requires Move B
+**Status:** fully closed for AR3 (compromised adapter container); open for AR4 (code execution inside the gateway process itself)
 
-**Correction from an earlier draft of this file:** `force_pair_owner()` writes directly to `pairings.sqlite`, a completely separate SQLite file from `audit.sqlite` — it is never routed through `glc.audit.append()`, so the L2 hash-chain fix gives it **no** protection at all, tamper-evident or otherwise. There is no Part-1-scope code fix here: the call is an ordinary importable function with no access control, and no amount of code-level permission checking closes that without a process boundary (Move B). Verified directly: `grep -n "audit_append\|from glc.audit" glc/security/pairing.py` returns nothing.
+**Correction from an earlier draft of this file:** `force_pair_owner()` writes directly to `pairings.sqlite`, a completely separate SQLite file from `audit.sqlite` — it is never routed through `glc.audit.append()`, so the L2 hash-chain fix gives it no protection, tamper-evident or otherwise.
+**What actually closes it for AR3:** now that Move B/C puts every catalogue adapter in its own Modal Function (a real container, per `docs/ARCHITECTURE.md` and Section 5's own description of what a container provides), and `adapter_image()`/`make_adapter_functions()` deliberately never set `GLC_PAIRING_DB` or mount the Volume, calling `force_pair_owner()` from inside any adapter's container cannot reach `/data/glc/pairings.sqlite` — the real store the gateway trusts. The call still runs (Python has no in-process ACL on a function you can import), but it can only write to that container's own throwaway, ephemeral local file, which no other container — including the real gateway — ever reads.
+**Re-verified live:** deployed a throwaway probe sharing the exact adapter-image shape (no Volume, no `GLC_CONFIG_DIR`/`GLC_PAIRING_DB`) and checked `os.path.isdir("/data")` from inside it — `False`. There is no `/data` mount to write to at all, regardless of what code runs.
+**Still open for AR4:** an attacker with code execution inside the gateway process itself has the real Volume mount and the real `GLC_PAIRING_DB`, so `force_pair_owner()` is still fully effective there — that rung requires a further split of the gateway's own trusted internals from its request-handling code, which is out of scope here (see "Not fixed this round" below).
 
 ### L4 — Install token readable in-process
 
 **Location:** `glc/config.py`
 **Invariant broken:** INV-4
-**Status:** open — requires Move B (not fixed this round; `0o600` file permission stops other OS users, not other in-process code, and no Part-1-scope mitigation closes this without full separation)
+**Status:** fully closed for AR3; open for AR4
+
+**Before:** `0o600` file permission stops other OS users, not other in-process code.
+**What actually closes it for AR3:** same mechanism as L3 — `glc.config.get_or_create_install_token()` called from inside any adapter's container resolves `CONFIG_DIR` to that container's own local `~/.glc` (no `GLC_CONFIG_DIR` set there), disconnected from `/data/glc/install_token`, the real token the gateway checks against. An adapter container cannot read or forge the real token.
+**Re-verified live:** same probe as L3 — no `/data` mount exists in an adapter-shaped container at all.
+**Still open for AR4:** the gateway process itself has the real token file; closing this for that rung needs the same further internal split as L3/L5/L8.
 
 ### L5 — Policy engine monkey-patchable
 
 **Location:** `glc/policy/engine.py`
 **Invariant broken:** INV-6
-**Status:** open — requires Move B (the module-level `evaluate()` and the singleton are ordinary rebindable Python attributes; no code-level fix closes this without a process boundary)
+**Status:** open — genuinely deferred, not a scope choice made this round
+
+**Why no partial mitigation exists, checked rather than assumed:** unlike L2/L7/L10 (where the protected asset is *external data* — an audit row, a file path, a ledger entry — so a hash chain, an absolute path, or a range check can meaningfully raise the bar even without full prevention), L5's protected asset *is the running code's own integrity*. Any integrity check added around `evaluate()` (e.g., comparing it against a saved reference at call time) can be defeated by the same attacker simply also monkey-patching the check, since both run at the same privilege level in the same interpreter. Self-checking code cannot certify its own integrity against an attacker with equal in-process access — that requires an external verifier, i.e. a different process. Per the source material this plan is built from, this is explicitly deferred: *"Run the policy engine in a separate process (capstone scope); a shared process can always rebind it."* Not something skipped for lack of time — the assignment itself places it beyond Part 1.
 
 ### L6 — Unbounded egress
 
@@ -140,7 +152,12 @@ Same fix and verification as A4 above — this is A4's code-level consequence, c
 
 **Location:** `glc/routes/control.py:114` — `os.kill(os.getpid(), signal.SIGTERM)`
 **Invariant broken:** INV-6
-**Status:** open — requires Move B (the call itself is legitimately used by the loopback-gated kill endpoint; any other in-process code can call it directly, bypassing the loopback check entirely — no code-level fix closes this without a process boundary)
+**Status:** closed for AR3 by construction; open for AR4
+
+**Before:** any in-process code could call `os.kill(os.getpid(), SIGTERM)` directly, bypassing the loopback-only kill endpoint entirely.
+**What closes it for AR3:** every catalogue adapter now runs as its own Modal Function — a genuinely separate container with its own private PID namespace (this is what a container *is*: "its process IDs are a private numbering scheme, so it cannot see other processes"). `os.kill(os.getpid(), SIGTERM)` called from inside an adapter's `on_message()`/`send()` can only ever terminate that adapter's own container's own process — there is no `os.getpid()` value it could resolve to that reaches the actual `fastapi_app` Function's container, because they are different processes in different PID namespaces on Modal's side by construction, not by any code glc runs.
+**Verification note:** I did not get a clean empirical self-kill test — a scratch probe that called `os.kill(os.getpid(), SIGTERM)` on itself caused the local Modal CLI client to hang indefinitely waiting on the killed container (likely internal retry/reconnect behavior on an abnormal exit, not a security-relevant finding), and I killed the hung local process rather than let it run unbounded. I did directly confirm the underlying structural fact for the same container shape (via L3's probe: no shared `/data`, no shared anything) — PID namespace isolation is the same category of guarantee, provided together by the same container boundary, not something glc's code has to build separately. Confirmed live throughout: the real gateway's `/healthz` kept responding normally after every one of these probe attempts.
+**Still open for AR4:** an attacker with code execution inside the gateway process's own container can still call this and terminate it directly — that's the same process, so there's no boundary to cross.
 
 ### L9 — Cross-channel envelope spoofing
 
@@ -239,7 +256,8 @@ Literal same bug as C2 — see Section C.
 
 ## Not fixed this round (honest gaps)
 
-- **L3, L4, L5, L8 are not adapter leaks — migrating every adapter (below) does not touch them.** They live in the core gateway's own security internals (`force_pair_owner()`, the install-token file, the policy engine singleton, `os.kill`), not in any adapter's code, so per-adapter container separation has no effect on them. Closing them needs a *further* architectural split — separating the core gateway's own control-plane/security internals from its request-handling code — which is a deeper change than "every adapter gets its own container" and is out of scope here. (L3 was incorrectly marked "mitigated" in an earlier draft of this file — corrected above: `force_pair_owner()` writes to a separate SQLite file the L2 hash-chain fix never touches.)
+- **L3, L4, L8 are closed for AR3 (a compromised adapter container) but remain open for AR4 (code execution inside the gateway process itself).** They live in the core gateway's own security internals (`force_pair_owner()`, the install-token file, `os.kill`), not in any adapter's code — but the container boundary Move B/C builds happens to close the *adapter-reachable* version of each anyway, since an adapter container has no path at all to the real Volume-backed data or the real gateway process (verified live). Closing them for AR4 needs a *further* architectural split — separating the core gateway's own control-plane/security internals from its request-handling code — which is a deeper change than "every adapter gets its own container" and is out of scope here. (An earlier draft of this file marked L3 "open" outright and separately marked it "mitigated" via the L2 hash-chain, both wrong in different ways — corrected above: `force_pair_owner()` writes to a separate SQLite file the L2 fix never touches, but Move B/C's container boundary closes it for AR3 through a different mechanism entirely.)
+- **L5 is the one leak in this range with no available mitigation of any kind**, for a structural reason distinct from L3/L4/L8: its protected asset is the *running code's own integrity*, which cannot be self-certified against an attacker at the same privilege level (any in-process check can itself be patched out). It also isn't an adapter leak, so container separation doesn't touch it either. The source material this plan is built from explicitly defers this to "capstone scope."
 - **A3/L6 egress-wall full closure** — container separation (A4/L1) is now done for all 15 catalogue adapters, but the egress-allowlist mechanism (Move D) is only demonstrated for telegram, and isn't wired into the live per-request webhook dispatch path for any adapter (see below). The core gateway Function itself also still has open egress, which it legitimately needs to reach LLM providers.
 - **Move D (egress allowlist)** is demonstrated as a working mechanism (`verify_telegram_egress_allowlist`), not wired into the live per-request webhook dispatch path — spawning a fresh Sandbox per webhook call would add real per-request latency and complexity not justified for this assignment's scope, and hasn't been extended to the other 14 adapters.
 - **C5's rate limit/budget cap is global, not per-caller** — a consequence of A1's single shared install token. Finer-grained throttling would need a second identity signal (per-client API keys, or source IP as a coarse proxy).
