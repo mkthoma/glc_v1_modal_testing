@@ -187,20 +187,24 @@ section is the summary.
      blocking an arbitrary other domain — not wired into the live
      per-request dispatch path or extended to the other 14 adapters (see
      `FINDINGS.md` for why).
-5. **Closed the policy-engine monkey-patch leak (L5) for every attacker
-   tier**, including one with code execution inside the gateway process
-   itself — stronger than Move B/C's adapter fixes, which only close
-   for an adapter-container-level attacker. `glc-policy-engine` runs the
-   real decision in its own Modal Function with no Secret and no Volume
-   mount; `glc/policy/remote.py` dispatches to it instead of calling the
-   local `glc.policy.engine.evaluate`. Verified live: monkey-patched the
-   local `evaluate` reference to always return `allow`, then called the
-   real deployed Function with a request the packaged `policy.yaml`
-   denies — it returned `deny`, completely unaffected by the local
-   tamper. Honest caveat: nothing in the current route handlers calls
-   the policy engine for a real decision yet (the agent runtime is still
-   a stub), so this closes an architectural gap ahead of when it's
-   needed, not a currently-exploited call site.
+5. **Built a separated, un-monkey-patchable path for the policy engine
+   (L5) — but this does NOT close the finding as named.** `glc-policy-engine`
+   runs a decision in its own Modal Function with no Secret and no
+   Volume mount; `glc/policy/remote.py`'s `evaluate_remote()` dispatches
+   to it. Verified live: monkey-patched `glc.policy.engine.evaluate` to
+   always return `allow`, then called the *real deployed Function* with
+   a request the packaged `policy.yaml` denies — it returned `deny`,
+   unaffected by the local tamper. **But `glc/policy/engine.py` itself
+   was never modified**, and nothing calls `evaluate_remote()` yet — the
+   exact exploit the finding names still succeeds completely against
+   the original function, deployed or not, because monkey-patching
+   replaces the whole function object; no internal redesign of a
+   directly-callable function can stop that. This is genuinely different
+   from the L1/L3/L4/L8 fixes above, where the deployed reality actually
+   changed — for L5, a safer alternative now exists, unused, next to an
+   unmodified vulnerable original. See `FINDINGS.md` for the full
+   correction (an earlier draft of this section overclaimed "fully
+   closed").
 6. **Added defense-in-depth mitigations** for the leaks that can't be
    fully closed without full container separation: hash-chaining on the
    audit log (so tampering is *detectable* even before it's
@@ -353,21 +357,26 @@ directory. If you've fixed the code but not redeployed, these can show
 **Known limitations of the dashboard** (found by actually running it
 against a live gateway):
 
-- L1, L3, L4, L5, L8 will *always* report `vulnerable` locally, even
-  after fixing them — the checks run in-process on your own machine,
-  and a local subprocess can't observe whether your deployed adapter
-  or policy-engine containers are actually separated. L1/L3/L4/L8 are
+- L1, L3, L4, L5, L8 will *always* report `vulnerable` locally — but
+  for two genuinely different reasons, and only four of the five are a
+  tooling limitation. L1/L3/L4/L8: the checks run in-process on your
+  own machine, and a local subprocess can't observe whether your
+  deployed adapter containers are actually separated — those four are
   genuinely closed for an adapter-container-level attacker in the live
-  deployment; L5 is genuinely closed for *every* attacker tier,
-  including one with code execution inside the gateway process itself,
-  since the real decision now runs in its own Modal Function with no
-  Secret and no Volume (all verified directly against Modal — see
-  `FINDINGS.md`). This dashboard just has no way to see any of that
-  from a local, in-process run. L1/L3/L4/L8 remain open for an attacker
-  with code execution inside the gateway process itself, since that
-  process still holds the real Volume-backed data those four protect —
-  a different, harder rung than what container separation alone
-  defends.
+  deployment (verified directly against Modal — see `FINDINGS.md`);
+  this dashboard just can't see that from a local run. **L5 is
+  different: its `vulnerable` result is correct, not a limitation.**
+  The check monkey-patches `glc.policy.engine.evaluate` and calls that
+  exact function again — and it's still tampered, because that
+  function was never modified. A separated, un-monkey-patchable
+  alternative (`glc-policy-engine`) exists and is deployed, but nothing
+  calls it, so the original exploit still fully succeeds against the
+  original function, deployed or not. Don't mark L5 `closed` manually
+  the way you would L1/L3/L4/L8 — see its `FINDINGS.md` entry.
+  L1/L3/L4/L8 remain open for an attacker with code execution inside
+  the gateway process itself, since that process still holds the real
+  Volume-backed data those four protect — a different, harder rung
+  than what container separation alone defends.
 - C4 (verbose errors) under-reports as `closed` if the target has zero
   provider keys configured — set at least one mock key so a real
   upstream attempt actually happens.
