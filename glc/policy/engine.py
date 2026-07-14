@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import sys
 import threading
+import types as _types
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,14 @@ def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> boo
 
 
 class PolicyEngine:
+    # L5 fix, layer 1: __slots__ blocks instance-level monkey-patching of
+    # evaluate — `some_engine.evaluate = lambda *a, **k: ...` normally
+    # shadows the class method with an instance attribute; with __slots__
+    # restricted to the two real instance attributes, that assignment
+    # raises AttributeError instead of silently succeeding, since
+    # instances no longer have a __dict__ to hold arbitrary attributes.
+    __slots__ = ("config", "_lock")
+
     def __init__(self, config: PolicyConfig):
         self.config = config
         self._lock = threading.Lock()
@@ -167,3 +177,41 @@ def reload_engine() -> None:
 
 def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
     return get_engine().evaluate(tool_call, context)
+
+
+# L5 fix, layer 2: block `glc.policy.engine.evaluate = lambda *a, **k: ...`
+# style monkey-patching of the module itself, not just the class.
+#
+# A plain module object stores its attributes in a regular __dict__, and
+# external code assigning `module.name = x` calls object.__setattr__ on the
+# module — nothing stops it. Swapping the module's __class__ for a
+# types.ModuleType subclass lets us intercept that path: __setattr__ raises
+# for a frozen set of names once they're already defined.
+#
+# This does NOT stop every possible rebind. Internal `global x; x = value`
+# statements compile to a direct write on the frame's globals dict (the
+# module's __dict__), bypassing __setattr__ entirely — that's how
+# get_engine()'s `global _engine` still works, and it's also why _engine
+# itself is deliberately left out of the frozen set (tests reset it via
+# `eng_mod._engine = None`, an external assignment style that would defeat
+# a naive "freeze everything" approach and offers no real security value
+# for that particular name). A sufficiently privileged attacker with
+# __dict__ or ctypes-level access could still force the change; this closes
+# the naive, direct monkey-patch shown in the finding and used by
+# tools/findings_console's L5 check, not every conceivable in-process
+# tamper technique. See L2's hash-chain tail-deletion limitation in
+# FINDINGS.md for the same caveat applied elsewhere.
+_FROZEN_NAMES = frozenset({"evaluate", "get_engine", "reload_engine"})
+
+
+class _FrozenPolicyModule(_types.ModuleType):
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _FROZEN_NAMES and name in self.__dict__:
+            raise AttributeError(
+                f"glc.policy.engine.{name} is frozen after import and cannot be reassigned "
+                "(L5 hardening — see FINDINGS.md)"
+            )
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _FrozenPolicyModule
