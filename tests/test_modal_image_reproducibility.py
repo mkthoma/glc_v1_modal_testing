@@ -144,6 +144,36 @@ def test_core_gateway_function_does_not_import_adapter_secrets():
     assert "GLC_SEPARATED_ADAPTERS" in core_fn_block
 
 
+def test_policy_engine_runs_as_its_own_function():
+    """L5 — the policy engine must be its own Modal Function, not an
+    in-process call, or monkey-patching glc.policy.engine.evaluate in
+    the gateway's own process would still neuter every decision."""
+    src = _source()
+    assert re.search(r'name="glc-policy-engine"', src)
+    assert "from glc.policy.engine import evaluate" in src
+
+
+def test_policy_engine_function_has_no_secrets_or_volume():
+    """The policy Function's only inputs are the tool_call/context dicts
+    passed in on each call — no Secret, no Volume mount. Mounting the
+    Volume here would let a compromised policy container read the real
+    pairing/audit/install-token data, re-opening what Move B/C closed
+    for adapters."""
+    src = _source()
+    m = re.search(r"@app\.function\(image=policy_image[^\n]*\)", src)
+    assert m, "could not locate the policy engine Function's decorator"
+    block = m.group(0)
+    assert "secrets=" not in block
+    assert "volumes=" not in block
+
+
+def test_core_gateway_routes_policy_checks_through_the_separated_function():
+    src = _source()
+    m = re.search(r"@app\.function\(\s*image=image,.*?\n\)", src, re.DOTALL)
+    assert m, "could not locate the core gateway Function's decorator"
+    assert "GLC_POLICY_ENGINE_REMOTE" in m.group(0)
+
+
 def test_telegram_egress_allowlist_is_configured():
     """Move D — telegram's Sandbox egress control must be an allowlist
     (specific domains), not the coarse all-or-nothing block_network flag

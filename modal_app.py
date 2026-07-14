@@ -201,6 +201,42 @@ for _adapter_name, _secret_name in ADAPTER_SECRETS.items():
 
 
 # ---------------------------------------------------------------------------
+# L5 fix: run the policy engine in its own process
+# ---------------------------------------------------------------------------
+# glc.policy.engine.evaluate is a module-level function; any code sharing a
+# process can monkey-patch it directly and silently neuter every future
+# policy check. Unlike L3/L4/L8, an in-process integrity check around
+# evaluate() doesn't help here — an attacker with equal in-process privilege
+# can monkey-patch the check too. Self-checking code cannot certify its own
+# integrity against an attacker at the same privilege level; that needs an
+# external verifier, i.e. a different process — the exact boundary Move B/C
+# already builds for adapters, applied here to the policy engine instead.
+#
+# This Function gets no Secret and no Volume mount — its only inputs are the
+# tool_call/context dicts passed in on each call, and its policy rules come
+# from the packaged glc/policy/policy.yaml baked into the image, not the
+# shared Volume (mounting the Volume here would let a compromised policy
+# container read the real pairing/audit/install-token data, re-opening
+# exactly what Move B/C just closed for adapters). A custom policy.yaml
+# override via the Volume is a legitimate future enhancement; it isn't
+# built here because it would need its own, separately-scoped read path.
+policy_image = (
+    modal.Image.from_registry(
+        "python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3"
+    )
+    .uv_sync(extra_options="--no-dev")
+    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
+)
+
+
+@app.function(image=policy_image, name="glc-policy-engine", serialized=True)
+def evaluate_policy(tool_call: dict, context: dict) -> dict:
+    from glc.policy.engine import evaluate
+
+    return evaluate(tool_call, context).model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
 # Move D: egress allowlist via Modal Sandboxes, demonstrated on telegram
 # ---------------------------------------------------------------------------
 # A3/L6: the core gateway Function has no network egress control at all —
@@ -280,7 +316,14 @@ def verify_telegram_egress_allowlist():
     # Function (above), so this core Function never imports adapter code
     # in-process and never has any channel credential in its environment
     # — only glc-llm-keys.
-    env={"GLC_SEPARATED_ADAPTERS": ",".join(ADAPTER_SECRETS)},
+    # L5 fix: GLC_POLICY_ENGINE_REMOTE=1 routes any future policy check
+    # through the separated glc-policy-engine Function above instead of
+    # the in-process glc.policy.engine.evaluate, so monkey-patching the
+    # local reference can't neuter the actual decision.
+    env={
+        "GLC_SEPARATED_ADAPTERS": ",".join(ADAPTER_SECRETS),
+        "GLC_POLICY_ENGINE_REMOTE": "1",
+    },
     min_containers=0,  # scale to zero when idle -> protects the free tier
     # A6 fix: the audit log and gateway db are plain sqlite3.connect()
     # calls on the shared Volume with no cross-container coordination —

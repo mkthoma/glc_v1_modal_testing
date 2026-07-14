@@ -187,18 +187,32 @@ section is the summary.
      blocking an arbitrary other domain — not wired into the live
      per-request dispatch path or extended to the other 14 adapters (see
      `FINDINGS.md` for why).
-5. **Added defense-in-depth mitigations** for the leaks that can't be
+5. **Closed the policy-engine monkey-patch leak (L5) for every attacker
+   tier**, including one with code execution inside the gateway process
+   itself — stronger than Move B/C's adapter fixes, which only close
+   for an adapter-container-level attacker. `glc-policy-engine` runs the
+   real decision in its own Modal Function with no Secret and no Volume
+   mount; `glc/policy/remote.py` dispatches to it instead of calling the
+   local `glc.policy.engine.evaluate`. Verified live: monkey-patched the
+   local `evaluate` reference to always return `allow`, then called the
+   real deployed Function with a request the packaged `policy.yaml`
+   denies — it returned `deny`, completely unaffected by the local
+   tamper. Honest caveat: nothing in the current route handlers calls
+   the policy engine for a real decision yet (the agent runtime is still
+   a stub), so this closes an architectural gap ahead of when it's
+   needed, not a currently-exploited call site.
+6. **Added defense-in-depth mitigations** for the leaks that can't be
    fully closed without full container separation: hash-chaining on the
    audit log (so tampering is *detectable* even before it's
    *preventable* — verified by directly `DELETE`/`UPDATE`-ing a live
    audit.sqlite and confirming `verify_chain()` catches it), input-range
    validation on cost-ledger writes, and an absolute configured path for
    the whisper_cpp binary instead of `PATH`-based resolution.
-6. **Regression-tested every fix** (158 tests, ~89% coverage on `glc/`,
+7. **Regression-tested every fix** (171 tests, ~89% coverage on `glc/`,
    well above the CI gate) and **redeployed after every hardening
    commit**, re-confirming `/healthz` and the fix itself against the live
    Modal deployment each time — not just locally.
-7. **Built a local testing dashboard** (`tools/findings_console/`) that
+8. **Built a local testing dashboard** (`tools/findings_console/`) that
    automates the manual repro steps for all 22 findings against any
    target — see below.
 
@@ -342,15 +356,18 @@ against a live gateway):
 - L1, L3, L4, L5, L8 will *always* report `vulnerable` locally, even
   after fixing them — the checks run in-process on your own machine,
   and a local subprocess can't observe whether your deployed adapter
-  containers are actually separated. L1/L3/L4/L8 are genuinely closed
-  for an adapter-container-level attacker in the live deployment
-  (verified directly against Modal — see `FINDINGS.md`); this dashboard
-  just has no way to see that from a local run. L5 is the one exception
-  that's genuinely still open at every tier — see its `FINDINGS.md`
-  entry for why no mitigation is possible for it at all. All five
-  remain open for an attacker with code execution inside the gateway
-  process itself, which is a different, harder rung than what
-  container separation defends.
+  or policy-engine containers are actually separated. L1/L3/L4/L8 are
+  genuinely closed for an adapter-container-level attacker in the live
+  deployment; L5 is genuinely closed for *every* attacker tier,
+  including one with code execution inside the gateway process itself,
+  since the real decision now runs in its own Modal Function with no
+  Secret and no Volume (all verified directly against Modal — see
+  `FINDINGS.md`). This dashboard just has no way to see any of that
+  from a local, in-process run. L1/L3/L4/L8 remain open for an attacker
+  with code execution inside the gateway process itself, since that
+  process still holds the real Volume-backed data those four protect —
+  a different, harder rung than what container separation alone
+  defends.
 - C4 (verbose errors) under-reports as `closed` if the target has zero
   provider keys configured — set at least one mock key so a real
   upstream attempt actually happens.
