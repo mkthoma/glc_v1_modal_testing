@@ -1,20 +1,29 @@
-"""tools/findings_console/checks_live_probe.py — L1/L3/L4 now call a real
-deployed Modal Function (glc-adapter-shape-probe) instead of running a
-local subprocess that always says "vulnerable" by construction. These
-tests mock modal.Function.from_name(...).remote() so they run without
-any real Modal deployment or network access, the same way
-test_policy_remote.py mocks the equivalent call for L5."""
+"""tools/findings_console/checks_live_probe.py — L1/L3/L4/L8 now call real
+deployed Modal Functions (glc-adapter-shape-probe,
+glc-adapter-shape-self-kill-probe) instead of running a local subprocess
+that always says "vulnerable" by construction. These tests mock
+modal.Function.from_name(...).remote() and httpx so they run without any
+real Modal deployment or network access, the same way test_policy_remote.py
+mocks the equivalent call for L5."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 from tools.findings_console import checks_live_probe as live_probe
-from tools.findings_console.models import Verdict
+from tools.findings_console.models import Target, Verdict
+
+_TARGET = Target(name="modal", base_url="https://example.modal.run", install_token=None)
 
 
 def _patch_app_detection():
     return patch.object(live_probe, "detect_app_and_function", return_value=("glc-v1-gateway", "fastapi_app"))
+
+
+def _healthz_response(status_code: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    return resp
 
 
 def test_l1_closed_when_probe_reports_no_gemini_key():
@@ -84,7 +93,7 @@ def test_reports_error_not_vulnerable_when_modal_call_raises():
     assert "not found" in result.evidence
 
 
-def test_all_three_checks_registered_with_live_probe_kind():
+def test_all_four_checks_registered_with_live_probe_kind():
     from tools.findings_console.models import CheckKind
 
     ids_and_kinds = {c.id: c.kind for c in live_probe.CHECKS}
@@ -92,4 +101,53 @@ def test_all_three_checks_registered_with_live_probe_kind():
         "L1": CheckKind.LIVE_PROBE,
         "L3": CheckKind.LIVE_PROBE,
         "L4": CheckKind.LIVE_PROBE,
+        "L8": CheckKind.LIVE_PROBE,
     }
+
+
+def test_l8_closed_when_self_kill_raises_and_gateway_stays_healthy():
+    with (
+        _patch_app_detection(),
+        patch("httpx.get", side_effect=[_healthz_response(200), _healthz_response(200)]),
+        patch(
+            "modal.Function.from_name",
+            return_value=MagicMock(remote=MagicMock(side_effect=RuntimeError("killed"))),
+        ),
+    ):
+        result = live_probe._check_l8(_TARGET)
+    assert result.verdict == Verdict.CLOSED
+
+
+def test_l8_vulnerable_when_gateway_unhealthy_after_self_kill():
+    with (
+        _patch_app_detection(),
+        patch("httpx.get", side_effect=[_healthz_response(200), _healthz_response(500)]),
+        patch(
+            "modal.Function.from_name",
+            return_value=MagicMock(remote=MagicMock(side_effect=RuntimeError("killed"))),
+        ),
+    ):
+        result = live_probe._check_l8(_TARGET)
+    assert result.verdict == Verdict.VULNERABLE
+
+
+def test_l8_error_when_gateway_unhealthy_before_testing():
+    """Never risk the self-kill test at all if the gateway isn't even
+    healthy to begin with — a post-kill failure would be meaningless."""
+    with patch("httpx.get", return_value=_healthz_response(500)):
+        result = live_probe._check_l8(_TARGET)
+    assert result.verdict == Verdict.ERROR
+
+
+def test_l8_error_when_self_kill_probe_returns_normally():
+    """If the self-kill probe somehow doesn't terminate, that's
+    inconclusive test mechanics, not a security claim either way."""
+    with (
+        _patch_app_detection(),
+        patch("httpx.get", side_effect=[_healthz_response(200), _healthz_response(200)]),
+        patch(
+            "modal.Function.from_name", return_value=MagicMock(remote=MagicMock(return_value="still alive"))
+        ),
+    ):
+        result = live_probe._check_l8(_TARGET)
+    assert result.verdict == Verdict.ERROR

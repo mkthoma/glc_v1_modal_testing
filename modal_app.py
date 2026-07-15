@@ -244,6 +244,32 @@ def adapter_shape_probe() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# L8 live verification probe
+# ---------------------------------------------------------------------------
+# Same reasoning as the L1/L3/L4 probe above, for a different finding:
+# os.kill(os.getpid(), SIGTERM) is reachable from any in-process code, no
+# loopback/token check at all. The open question isn't whether the call
+# succeeds (it obviously does — Python can't block it), it's whether
+# killing *this* container's own process can reach anything outside it.
+# Kept as its own Function, separate from adapter_shape_probe, so a run
+# that self-kills never risks the environment-inspection checks above —
+# an experiment confirmed calling .remote() on a self-killing Function
+# raises a clean exception after ~20-30s (Modal detects the abnormal exit
+# and reports it through the call itself) rather than hanging the way an
+# earlier `modal run` *script* invocation did — safe to call from the
+# console's own request thread.
+@app.function(
+    image=adapter_image("shape-probe-selfkill"), name="glc-adapter-shape-self-kill-probe", serialized=True
+)
+def adapter_shape_self_kill_probe() -> str:
+    import os
+    import signal
+
+    os.kill(os.getpid(), signal.SIGTERM)
+    return "still alive (unexpected — self-kill did not terminate the process)"
+
+
+# ---------------------------------------------------------------------------
 # L5 fix: run the policy engine in its own process
 # ---------------------------------------------------------------------------
 # glc.policy.engine.evaluate is a module-level function; any code sharing a

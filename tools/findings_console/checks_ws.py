@@ -30,6 +30,13 @@ _ROUTE_CHANNEL = "webui"
 _SPOOF_CHANNEL = "whatsapp"
 
 
+class _PairingSetupBlocked(Exception):
+    """Raised when _ensure_paired_owner can't complete because of an
+    expected side effect of a *different* check (C6's pairing-confirm
+    lockout is global, not scoped per caller/identity — see
+    checks_http.py's C6), not a bug in C2/L9 itself."""
+
+
 def _ensure_paired_owner(target: Target, channel: str) -> None:
     """The allowlist drops messages from unknown senders before the
     spoof-vulnerable code ever runs — that's a *different* control, not
@@ -45,9 +52,27 @@ def _ensure_paired_owner(target: Target, channel: str) -> None:
     )
     pair.raise_for_status()
     code = pair.json()["code"]
-    httpx.post(
+    confirm = httpx.post(
         f"{target.base_url}/v1/control/pair/confirm", headers=h, json={"code": code}, timeout=10
-    ).raise_for_status()
+    )
+    if confirm.status_code == 429:
+        # C6's own fix (glc/security/pairing.py's CONFIRM_ATTEMPT_LIMIT) is a
+        # single global counter on the confirm endpoint, not scoped per
+        # channel_user_id or caller — deliberately, since scoping a
+        # brute-force lockout per identity lets an attacker just rotate
+        # identities to reset it. That correctly-designed global lockout
+        # has a real, documented side effect: if C6 tripped it recently,
+        # this check's OWN legitimate confirm (the right code, first try)
+        # gets blocked by the same window. Not a bug in either check.
+        raise _PairingSetupBlocked(
+            "the gateway's pairing-confirm lockout is still active, most likely tripped by a recent "
+            "C6 run in this same 5-minute window (glc/security/pairing.py's CONFIRM_ATTEMPT_LIMIT is a "
+            "single global counter, deliberately not scoped per identity — see C6's fix_summary). This "
+            "check's own setup step needs one legitimate confirm and got blocked by that same lockout. "
+            "Not a bug in C2/L9 or C6 — wait for the 5-minute window to pass and re-run, or run this "
+            "check before C6 in a fresh pass."
+        )
+    confirm.raise_for_status()
 
 
 def _ws_url(target: Target, path: str) -> str:
@@ -172,6 +197,8 @@ def _check_c2(target: Target) -> CheckResult:
         )
     try:
         _ensure_paired_owner(target, _ROUTE_CHANNEL)
+    except _PairingSetupBlocked as e:
+        return CheckResult("C2", target.name, CheckKind.WS, Verdict.ERROR, str(e), str(e), error=str(e))
     except httpx.HTTPError as e:
         return CheckResult(
             "C2",
@@ -239,7 +266,9 @@ CHECKS: list[Check] = [
         _check_c2,
         "T1.6",
         notes="Same underlying bug as L9 in the ground-truth table. Uses webui/whatsapp (not "
-        "telegram/discord) because those are the channels enabled by default in channels.yaml.",
+        "telegram/discord) because those are the channels enabled by default in channels.yaml. If this "
+        "reports error mentioning a pairing lockout, that's C6's global confirm-attempt limiter still "
+        "active from a recent run of C6 — not a bug here; wait ~5 minutes and re-run.",
         attacker_role="AR3",
         command=_C2_COMMAND,
         fix_summary=(

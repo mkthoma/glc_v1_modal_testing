@@ -195,6 +195,30 @@ def test_adapter_shape_probe_has_no_secret_and_uses_adapter_image():
     assert "volumes=" not in block
 
 
+def test_adapter_shape_self_kill_probe_function_exists():
+    """L8's live check calls this Function directly, separate from the
+    read-only adapter_shape_probe above so a self-kill test never risks
+    the environment-inspection checks."""
+    src = _source()
+    assert re.search(r'name="glc-adapter-shape-self-kill-probe"', src)
+    assert "def adapter_shape_self_kill_probe" in src
+    assert "os.kill(os.getpid()" in src
+
+
+def test_adapter_shape_self_kill_probe_has_no_secret_or_volume():
+    """Slice out just this one Function's own decorator (from the nearest
+    preceding @app.function( to the def line) rather than a regex that
+    could accidentally span across other, unrelated Functions above it."""
+    src = _source()
+    def_idx = src.index("def adapter_shape_self_kill_probe")
+    decorator_start = src.rindex("@app.function(", 0, def_idx)
+    block = src[decorator_start:def_idx]
+    assert "adapter_image" in block
+    assert "secrets=" not in block
+    assert "volumes=" not in block
+    assert "volumes=" not in block
+
+
 def test_telegram_egress_allowlist_is_configured():
     """Move D — telegram's Sandbox egress control must be an allowlist
     (specific domains), not the coarse all-or-nothing block_network flag

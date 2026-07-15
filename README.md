@@ -363,8 +363,8 @@ somewhere else.
 |---|---|---|---|
 | `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | your deployed `*.modal.run` gateway |
 | `ws` | `target.base_url` | C2 (=L9), C3 | same, over WebSocket |
-| `live_probe` | calls `glc-adapter-shape-probe` via the Modal SDK | L1, L3, L4 | ignores `base_url` — calls a deployed Function by name, not an HTTP endpoint; requires the app deployed with that Function present |
-| `inprocess` | your local checkout only | L2, L5, L8, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
+| `live_probe` | calls a deployed Function via the Modal SDK | L1, L3, L4, L8 | ignores `base_url` for the call itself (L8 also checks `/healthz` on it) — calls a deployed Function by name, not an HTTP endpoint; requires the app deployed with that Function present |
+| `inprocess` | your local checkout only | L2, L5, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
 | `static` | your local checkout only | A3, A4, A5, A6, L6, L7 | reads `modal_app.py`/source files directly; ignores `base_url` |
 
 `inprocess` and `static` checks can never observe a live Modal
@@ -376,20 +376,18 @@ directory. If you've fixed the code but not redeployed, these can show
 **Known limitations of the dashboard** (found by actually running it
 against a live gateway):
 
-- **L1, L3, L4 now report `closed` for real, verified live against your
-  deployment — not a documented assumption.** `modal_app.py` deploys
-  `glc-adapter-shape-probe`, a Function built with the exact same
+- **L1, L3, L4, L8 now report `closed` for real, verified live against
+  your deployment — not a documented assumption.** `modal_app.py` deploys
+  `glc-adapter-shape-probe` (env/pairing/token checks) and
+  `glc-adapter-shape-self-kill-probe` (a separate Function so a self-kill
+  test never risks the read-only ones), both built with the exact same
   container shape as a real catalogue adapter (no LLM Secret, no Volume
-  mount), and these three checks call it directly and report what it
-  actually observes. Requires the app to be deployed with this Function
-  present (any `modal deploy modal_app.py` after this fix landed) —
-  otherwise they report `error`, not a guess either way.
-- **L8 still *always* reports `vulnerable` from this console, deliberately.**
-  Unlike L1/L3/L4, testing it live means actually calling `os.kill()` on
-  the deployed probe — which risks hanging the caller on the container's
-  abnormal exit (seen once this session). It stays a local, in-process
-  demonstration with the underlying structural fact (separate PID
-  namespace) confirmed a different way — see its `FINDINGS.md` entry.
+  mount). These four checks call them directly and report what they
+  actually observe; L8 also confirms `/healthz` stays healthy immediately
+  before and after the self-kill, and takes ~25-30s rather than being
+  instant. Requires the app deployed with these Functions present (any
+  `modal deploy modal_app.py` after this fix landed) — otherwise they
+  report `error`, not a guess either way.
 - **L5 reports `mitigated`, not `vulnerable`, once `glc/policy/engine.py`'s
   hardening is deployed.** The exact one-liner the finding names
   (`glc.policy.engine.evaluate = lambda ...`) now raises `AttributeError`
@@ -419,15 +417,20 @@ against a live gateway):
   deployed gateway, since that's the only target this console has. Expect
   this to briefly drive real (if tiny) usage.
 - **Checks can trip each other's global rate limits/lockouts in a single
-  `Run all checks` pass.** C5's data-plane limiter and C6's pairing-confirm
-  lockout are both global (see their own caveats above), not per-check —
-  so if C6 runs first and exhausts the confirm-attempt lockout, C2/L9's
-  own setup step (which pairs a probe identity via `/v1/control/pair/confirm`)
-  can fail with a *legitimate* `429` from your own C6 fix working
-  correctly, surfacing as `error` rather than `closed`. This isn't a bug
-  in the fix — re-run the affected check by itself once the lockout
-  window (5 minutes) has passed, or run checks individually instead of
-  all at once.
+  `Run all checks` pass — the console now says so plainly instead of
+  showing a bare exception.** C5's data-plane limiter and C6's
+  pairing-confirm lockout are both global (see their own caveats above),
+  not per-check — so if C6 runs first and exhausts the confirm-attempt
+  lockout, C2/L9's own setup step (which pairs a probe identity via
+  `/v1/control/pair/confirm`) hits a *legitimate* `429` from C6's own fix
+  working correctly. C2/L9's check now detects this specific 429 and
+  reports `error` with a summary naming C6 and the 5-minute window
+  directly, instead of a generic connection-error-looking message. This
+  isn't a bug in either fix, and scoping C6's lockout per-identity to
+  avoid the collision would be the wrong trade — that would let a real
+  attacker just rotate identities to reset their own lockout. Re-run C2/L9
+  by itself once the window has passed, or run it before C6 in a fresh
+  pass.
 
 Stop the console with **Ctrl+C** — a force-kill just leaves port 8811
 bound until the next startup's port-guard clears it.

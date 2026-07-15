@@ -1,19 +1,12 @@
-"""In-process leak checks: L2, L5, L8, L10.
+"""In-process leak checks: L2, L5, L10.
 
-L1, L3, L4 used to live here too, as local-subprocess demonstrations
+L1, L3, L4, L8 used to live here too, as local-subprocess demonstrations
 that always reported VULNERABLE by construction — the check shares a
 process with the code it's testing, so it can prove the attack surface
 exists but can't observe whether a real deployed adapter container is
 actually separated. They've moved to checks_live_probe.py, which calls
-a Modal Function deployed with the real adapter container shape instead
+Modal Functions deployed with the real adapter container shape instead
 and gets a genuine, live-measured verdict.
-
-L8 stays here: it self-kills the harness process to prove os.kill()
-is reachable, and testing that live against a real deployed container
-risks hanging the caller on an abnormal container exit (seen once this
-session with a `modal run` probe) — so it keeps the local-only,
-always-VULNERABLE demonstration with its documented caveat rather than
-risk that against the live probe Function.
 
 L2 and L10 are different again: input validation (T1.15) and
 hash-chaining (T1.14) are real, checkable, code-level mitigations
@@ -144,16 +137,6 @@ except AttributeError as e:
         print(f"FINDINGS_CONSOLE_RESULT: error|__dict__ write did not take effect (after={after.action})")
 """
 
-_L8_SNIPPET = """
-import os, signal, sys
-print("FINDINGS_CONSOLE_RESULT: vulnerable|about to call os.kill(os.getpid(), SIGTERM) from "
-      "arbitrary in-process code with no loopback/token check (this is an isolated subprocess "
-      "spawned by the console, not your real dev server or deployed gateway)")
-sys.stdout.flush()
-os.kill(os.getpid(), signal.SIGTERM)
-print("FINDINGS_CONSOLE_RESULT: error|os.kill did not terminate the process")
-"""
-
 _L10_SNIPPET = """
 import glc.db as db
 db.init()
@@ -206,18 +189,6 @@ def _make(
     )
 
 
-_CONTAINER_ISOLATION_FIX = (
-    "modal_app.py's make_adapter_functions() puts every catalogue adapter in its own Modal Function "
-    "(a real container), and adapter_image() deliberately never sets GLC_CONFIG_DIR/GLC_AUDIT_DB/"
-    "GLC_PAIRING_DB/GLC_GATEWAY_DB or mounts the Volume. This check always reports 'vulnerable' because "
-    "it runs as a plain local subprocess importing glc directly — the same process as the code it's "
-    "attacking, by construction. It cannot observe an adapter container from outside it. Verified "
-    "instead with a throwaway probe Function sharing the adapter image's exact shape: no /data mount "
-    "exists there at all, so this call has nothing real to reach for AR3. Still fully effective for "
-    "AR4 (code execution inside the gateway's own container, which does have the real mount) — see "
-    "FINDINGS.md, closing that needs a further split of the gateway's own trusted internals."
-)
-
 CHECKS: list[Check] = [
     _make(
         "L2",
@@ -253,20 +224,6 @@ CHECKS: list[Check] = [
             "glc-policy-engine Modal Function (glc/policy/remote.py's evaluate_remote()) is immune to "
             "both techniques and verified live, but nothing calls it yet."
         ),
-    ),
-    _make(
-        "L8",
-        "In-process kill",
-        "INV-8",
-        "os.kill(os.getpid(), SIGTERM) is reachable from any in-process code, bypassing the "
-        "/v1/control/kill loopback check entirely.",
-        _L8_SNIPPET,
-        "T1.11/T1.12",
-        "AR4",
-        fix_summary=_CONTAINER_ISOLATION_FIX
-        + " Each adapter container also has its own private PID namespace, so os.kill(os.getpid(), "
-        "SIGTERM) inside it can only ever kill that container's own process, never the gateway's.",
-        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3 by construction (separate PID namespace), not by this check.",
     ),
     _make(
         "L10",
