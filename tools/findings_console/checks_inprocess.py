@@ -1,21 +1,24 @@
-"""In-process leak checks: L1, L2, L3, L4, L5, L8, L10.
+"""In-process leak checks: L2, L5, L8, L10.
 
-Honesty note baked into the design, not just the copy: L1, L3, L4, L5,
-and L8 are structural — they exist because Python has no in-process ACL
-on `os.environ` or on importable functions. A local subprocess harness
-can only ever demonstrate that the attack surface exists in
-shared-process code; it cannot observe whether your *deployed* adapter
-containers (Move B, T1.11) are actually separated, because that would
-require running this same snippet from inside a live adapter container,
-not from this console. So these five always report VULNERABLE — that's
-correct, not a bug in the check. Mark them CLOSED in FINDINGS.md
-manually once T1.11/T1.12 are deployed and you've confirmed (by trying
-this exact snippet from inside an adapter's own container) that it no
-longer has the access it demonstrates here.
+L1, L3, L4 used to live here too, as local-subprocess demonstrations
+that always reported VULNERABLE by construction — the check shares a
+process with the code it's testing, so it can prove the attack surface
+exists but can't observe whether a real deployed adapter container is
+actually separated. They've moved to checks_live_probe.py, which calls
+a Modal Function deployed with the real adapter container shape instead
+and gets a genuine, live-measured verdict.
 
-L2 and L10 are different: input validation (T1.15) and hash-chaining
-(T1.14) are real, checkable, code-level mitigations independent of
-container separation, so those two can genuinely report MITIGATED.
+L8 stays here: it self-kills the harness process to prove os.kill()
+is reachable, and testing that live against a real deployed container
+risks hanging the caller on an abnormal container exit (seen once this
+session with a `modal run` probe) — so it keeps the local-only,
+always-VULNERABLE demonstration with its documented caveat rather than
+risk that against the live probe Function.
+
+L2 and L10 are different again: input validation (T1.15) and
+hash-chaining (T1.14) are real, checkable, code-level mitigations
+independent of container separation, so those two can genuinely report
+MITIGATED from a local run.
 """
 
 from __future__ import annotations
@@ -61,17 +64,6 @@ def _run(snippet: str, target: Target, check_id: str) -> CheckResult:
     )
 
 
-_L1_SNIPPET = """
-import os
-key = os.environ.get("GEMINI_API_KEY", "")
-if key:
-    print(f"FINDINGS_CONSOLE_RESULT: vulnerable|arbitrary code sharing this process read "
-          f"GEMINI_API_KEY ({key[:4]}...) via plain os.environ; Python has no in-process ACL "
-          f"on environment variables")
-else:
-    print("FINDINGS_CONSOLE_RESULT: error|GEMINI_API_KEY was not present (harness misconfigured)")
-"""
-
 _L2_SNIPPET = """
 import sqlite3, os
 from glc.audit import store as audit_store
@@ -114,30 +106,6 @@ elif verify_chain is not None:
 else:
     print(f"FINDINGS_CONSOLE_RESULT: vulnerable|direct DELETE succeeded (removed {deleted} row(s)); "
           f"no verify_chain() exists yet (T1.14 not applied)")
-"""
-
-_L3_SNIPPET = """
-from glc.security.pairing import get_pairing_store
-store = get_pairing_store()
-store.force_pair_owner("telegram", "findings-console-attacker", user_handle="me")
-check = store.lookup("telegram", "findings-console-attacker")
-if check is not None and check.trust_level == "owner_paired":
-    print("FINDINGS_CONSOLE_RESULT: vulnerable|force_pair_owner() is reachable from arbitrary "
-          "in-process code and granted owner_paired trust to a fabricated identity")
-else:
-    print("FINDINGS_CONSOLE_RESULT: error|force_pair_owner() did not produce the expected record")
-"""
-
-_L4_SNIPPET = """
-from glc.config import get_or_create_install_token, install_token_path
-tok = get_or_create_install_token()
-read_back = install_token_path().read_text().strip()
-if read_back == tok and tok:
-    print(f"FINDINGS_CONSOLE_RESULT: vulnerable|install token ({tok[:4]}...) is readable by any "
-          f"in-process code via install_token_path(); file mode 0600 only stops other OS users, "
-          f"not other in-process code")
-else:
-    print("FINDINGS_CONSOLE_RESULT: error|could not read back the install token")
 """
 
 _L5_SNIPPET = """
@@ -252,18 +220,6 @@ _CONTAINER_ISOLATION_FIX = (
 
 CHECKS: list[Check] = [
     _make(
-        "L1",
-        "Shared process environment",
-        "INV-1",
-        "Any in-process code can read GEMINI_API_KEY via os.environ — glc/providers.py's key "
-        "and an adapter's code share one process.",
-        _L1_SNIPPET,
-        "T1.11/T1.12",
-        "AR3",
-        fix_summary=_CONTAINER_ISOLATION_FIX,
-        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
-    ),
-    _make(
         "L2",
         "Audit log writable",
         "INV-7",
@@ -278,29 +234,6 @@ CHECKS: list[Check] = [
             "— but not prevented, and deleting the tail (or the whole table) isn't detected either, "
             "since there's no later row left to contradict it. Mitigated, not closed."
         ),
-    ),
-    _make(
-        "L3",
-        "Pairing escalation",
-        "INV-2",
-        "force_pair_owner() is an ordinary importable method, reachable from any in-process code.",
-        _L3_SNIPPET,
-        "T1.11/T1.12",
-        "AR4",
-        fix_summary=_CONTAINER_ISOLATION_FIX,
-        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
-    ),
-    _make(
-        "L4",
-        "Install token readable in-process",
-        "INV-2",
-        "get_or_create_install_token()/install_token_path() are readable from any in-process code; "
-        "0600 file mode only stops other OS users.",
-        _L4_SNIPPET,
-        "T1.11/T1.12",
-        "AR4",
-        fix_summary=_CONTAINER_ISOLATION_FIX,
-        notes="Known tool limitation: this always reports vulnerable when run from this console (see fix_summary above) — closed for AR3, verified via a separate live probe, not by this check.",
     ),
     _make(
         "L5",

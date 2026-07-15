@@ -57,6 +57,7 @@ class CheckKind(StrEnum):
     WS = "ws"
     INPROCESS = "inprocess"
     STATIC = "static"  # inspects local repo source, not a running target
+    LIVE_PROBE = "live_probe"  # calls a deployed Modal Function shaped like a real adapter container
 
 
 KIND_LABELS: dict[str, str] = {
@@ -64,6 +65,7 @@ KIND_LABELS: dict[str, str] = {
     "ws": "WebSocket connection",
     "inprocess": "Isolated subprocess",
     "static": "Source code inspection",
+    "live_probe": "Live Modal probe",
 }
 
 KIND_DESCRIPTIONS: dict[str, str] = {
@@ -80,6 +82,12 @@ KIND_DESCRIPTIONS: dict[str, str] = {
         "run inside the gateway's own process."
     ),
     "static": "Reads source files in your local checkout directly and never runs anything or contacts a target.",
+    "live_probe": (
+        "Calls glc-adapter-shape-probe, a Modal Function deployed with the exact same container shape "
+        "as a real catalogue adapter (no LLM Secret, no Volume mount) and reports what that live "
+        "container can actually observe. A genuine measurement of the deployed system, not a local "
+        "assumption — requires modal_app.py to be deployed with this Function present."
+    ),
 }
 
 

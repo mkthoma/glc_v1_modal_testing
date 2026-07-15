@@ -363,7 +363,8 @@ somewhere else.
 |---|---|---|---|
 | `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | your deployed `*.modal.run` gateway |
 | `ws` | `target.base_url` | C2 (=L9), C3 | same, over WebSocket |
-| `inprocess` | your local checkout only | L1, L2, L3, L4, L5, L8, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
+| `live_probe` | calls `glc-adapter-shape-probe` via the Modal SDK | L1, L3, L4 | ignores `base_url` — calls a deployed Function by name, not an HTTP endpoint; requires the app deployed with that Function present |
+| `inprocess` | your local checkout only | L2, L5, L8, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
 | `static` | your local checkout only | A3, A4, A5, A6, L6, L7 | reads `modal_app.py`/source files directly; ignores `base_url` |
 
 `inprocess` and `static` checks can never observe a live Modal
@@ -375,13 +376,20 @@ directory. If you've fixed the code but not redeployed, these can show
 **Known limitations of the dashboard** (found by actually running it
 against a live gateway):
 
-- L1, L3, L4, L8 will *always* report `vulnerable` from this console —
-  the checks run in-process on your own machine, and a local subprocess
-  can't observe whether your deployed adapter containers are actually
-  separated. Those four are genuinely closed for an adapter-container-
-  level attacker in the live deployment (verified directly against Modal
-  — see `FINDINGS.md`); this dashboard just can't see that from a local
-  run. Each check's own "How this is fixed" box explains this.
+- **L1, L3, L4 now report `closed` for real, verified live against your
+  deployment — not a documented assumption.** `modal_app.py` deploys
+  `glc-adapter-shape-probe`, a Function built with the exact same
+  container shape as a real catalogue adapter (no LLM Secret, no Volume
+  mount), and these three checks call it directly and report what it
+  actually observes. Requires the app to be deployed with this Function
+  present (any `modal deploy modal_app.py` after this fix landed) —
+  otherwise they report `error`, not a guess either way.
+- **L8 still *always* reports `vulnerable` from this console, deliberately.**
+  Unlike L1/L3/L4, testing it live means actually calling `os.kill()` on
+  the deployed probe — which risks hanging the caller on the container's
+  abnormal exit (seen once this session). It stays a local, in-process
+  demonstration with the underlying structural fact (separate PID
+  namespace) confirmed a different way — see its `FINDINGS.md` entry.
 - **L5 reports `mitigated`, not `vulnerable`, once `glc/policy/engine.py`'s
   hardening is deployed.** The exact one-liner the finding names
   (`glc.policy.engine.evaluate = lambda ...`) now raises `AttributeError`
@@ -393,6 +401,7 @@ against a live gateway):
   attacker. The separated, un-monkey-patchable `glc-policy-engine`
   Function is immune to both techniques and deployed, but nothing calls
   it yet — see its `FINDINGS.md` entry.
+
   L1/L3/L4/L8/L5 all remain open for an attacker with code execution
   inside the gateway process itself, since that process still holds the
   real Volume-backed data (or, for L5, the same module) those checks

@@ -201,6 +201,49 @@ for _adapter_name, _secret_name in ADAPTER_SECRETS.items():
 
 
 # ---------------------------------------------------------------------------
+# L1/L3/L4 live verification probe
+# ---------------------------------------------------------------------------
+# The findings console's local L1/L3/L4 checks run a subprocess on the
+# operator's own machine, sharing a process with the code they're testing
+# by construction — that can prove the code path exists, but can't observe
+# whether a real deployed adapter container is actually isolated the way
+# the comment above claims. This closes that gap for real: a Function
+# deployed with the exact same image shape as a genuine adapter (built from
+# adapter_image(), no Secret, no Volume mount — see make_adapter_functions()
+# above) that reports what it can actually observe from inside a live
+# container, so the console gets a real measurement instead of a documented
+# assumption. It carries no Secret at all, since the whole point is to
+# confirm nothing sensitive is reachable here — there's nothing to scope.
+@app.function(image=adapter_image("shape-probe"), name="glc-adapter-shape-probe", serialized=True)
+def adapter_shape_probe() -> dict:
+    import os
+
+    result: dict = {
+        "gemini_key_present": bool(os.environ.get("GEMINI_API_KEY", "")),
+        "data_mount_exists": os.path.isdir("/data"),
+    }
+
+    try:
+        from glc.security.pairing import get_pairing_store
+
+        store = get_pairing_store()
+        store.force_pair_owner("telegram", "console-shape-probe", user_handle="probe")
+        check = store.lookup("telegram", "console-shape-probe")
+        result["pairing_write_landed"] = check is not None and check.trust_level == "owner_paired"
+    except Exception as e:  # noqa: BLE001 - diagnostic probe, report the failure as data
+        result["pairing_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        from glc.config import get_or_create_install_token
+
+        result["install_token_created"] = bool(get_or_create_install_token())
+    except Exception as e:  # noqa: BLE001 - diagnostic probe, report the failure as data
+        result["install_token_error"] = f"{type(e).__name__}: {e}"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # L5 fix: run the policy engine in its own process
 # ---------------------------------------------------------------------------
 # glc.policy.engine.evaluate is a module-level function; any code sharing a

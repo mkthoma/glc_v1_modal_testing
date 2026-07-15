@@ -97,14 +97,16 @@ Every entry is still the same underlying `Check` regardless of which section(s) 
 |---|---|---|---|
 | `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | your deployed `*.modal.run` gateway |
 | `ws` | `target.base_url` | C2 (=L9), C3 | same, over a WebSocket |
-| `inprocess` | **your local checkout only** | L1, L2, L3, L4, L5, L8, L10 | ignores `base_url` — spawns an isolated subprocess importing the local `glc` package |
+| `live_probe` | **calls `glc-adapter-shape-probe` directly via the Modal SDK** | L1, L3, L4 | ignores `target.base_url` — calls a Modal Function by name (detected from `modal_app.py`, see `modal_detect.py`), not an HTTP endpoint. Requires the app to be deployed with that Function present. |
+| `inprocess` | **your local checkout only** | L2, L5, L8, L10 | ignores `base_url` — spawns an isolated subprocess importing the local `glc` package |
 | `static` | **your local checkout only** | A3, A4, A5, A6, L6, L7 | ignores `base_url` — reads `modal_app.py` / source files directly |
 
-**Why in-process and static checks can't test a deployed target:** there is no way to inject code into, or read the source of, a live Modal container from outside it. These always report on the code in your working directory, not on whatever's actually running on Modal. If you've fixed the code but haven't redeployed yet, these will show `closed`/`mitigated` while your `http`/`ws` checks against the stale deployment still show `vulnerable` — that's correct, not a bug; redeploy and re-run the `http`/`ws` checks to confirm the live gateway matches.
+**Why in-process and static checks can't test a deployed target:** there is no way to inject code into, or read the source of, a live Modal container from outside it. These always report on the code in your working directory, not on whatever's actually running on Modal. If you've fixed the code but haven't redeployed yet, these will show `closed`/`mitigated` while your `http`/`ws` checks against the stale deployment still show `vulnerable` — that's correct, not a bug; redeploy and re-run the `http`/`ws` checks to confirm the live gateway matches. `live_probe` checks split the difference: they don't touch `target.base_url`, but they do require a real deployment, since they call a Function that only exists once you've deployed.
 
 ## Known limitations (found by actually running this against a live deployment, not assumed)
 
-- **L1, L3, L4, L8 will *always* report `vulnerable` from this console, even after they're actually closed.** These are structural leaks that exist because Python has no in-process ACL — the only real fix is process/container separation (`PLAN.md` Move B, task T1.11). A local subprocess can only ever prove the attack surface *exists* in shared-process code; it can't observe whether your deployed adapter containers are actually separated, because that requires running this same snippet from inside a live adapter container, which is outside this tool's reach. Each check's own page explains this in its "How this is fixed" box; `FINDINGS.md` records the real status (fully closed for AR3, open for AR4), verified separately via throwaway probe Functions, not by this console.
+- **L1, L3, L4 now report `closed` for real, verified against your actual deployment — not a documented assumption.** `modal_app.py` deploys `glc-adapter-shape-probe`, a Function built with the exact same container shape as a real catalogue adapter (no LLM Secret, no Volume mount), and these three checks call it directly and report what it actually observes. If the app isn't deployed with this Function yet, they report `error`, not a guess either way — deploy (`modal deploy modal_app.py`) and re-run.
+- **L8 still *always* reports `vulnerable` from this console, deliberately.** It self-kills the harness process to demonstrate `os.kill()` is reachable; doing the same against the live probe risks hanging the caller on the container's abnormal exit (this happened once, verifying it manually, before this console existed). It stays a local demonstration with the underlying structural fact (a separate PID namespace) confirmed a different way — see its "How this is fixed" box and `FINDINGS.md`.
 - **L5 reports `mitigated`, not `vulnerable` or `closed`, once `glc/policy/engine.py`'s hardening is deployed.** The exact one-liner the finding names now raises `AttributeError`, but the check itself then demonstrates the documented residual gap (a direct `__dict__` write bypasses that check) — see its "How this is fixed" box.
 - **C4 (verbose upstream errors) under-reports as `closed` if the target has zero provider keys configured.** No provider is even attempted, so there's nothing to leak. Set at least one mock key (e.g. `GEMINI_API_KEY=mock-not-real`) on the target so a real upstream attempt happens before trusting this check's verdict.
 - **C1 (SSRF) is a text-matching heuristic, not a network-level oracle.** It looks for the word "block" in a `400` response body. Make your fix's rejection message say something like `"blocked: private/loopback address"` so this check can detect it — and read the evidence panel yourself either way.
@@ -124,9 +126,11 @@ tools/findings_console/
   store.py               append-only SQLite log (record/history/earliest/latest, pins, per-target variants)
   gitinfo.py              captures the local checkout's current commit for every run
   harness.py               spawns an isolated subprocess for in-process checks, scratch config dir
+  modal_detect.py           parses modal_app.py + calls the Modal SDK to auto-detect the target and app name
   checks_http.py            A1, A2, C1, C4, C5, C6
   checks_ws.py               C2/L9, C3
-  checks_inprocess.py        L1, L2, L3, L4, L5, L8, L10
+  checks_inprocess.py        L2, L5, L8, L10
+  checks_live_probe.py       L1, L3, L4 — calls glc-adapter-shape-probe for a real, live-measured verdict
   checks_static.py           A3, A4, A5, A6, L6, L7
   registry.py                aggregates all Check objects into one id-keyed registry (+ the L9 alias)
   runner.py                  executes a Check against a Target, stamps the git commit, records the result

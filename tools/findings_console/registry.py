@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import dataclasses
 
-from tools.findings_console import checks_http, checks_inprocess, checks_static, checks_ws
+from tools.findings_console import (
+    checks_http,
+    checks_inprocess,
+    checks_live_probe,
+    checks_static,
+    checks_ws,
+)
 from tools.findings_console.models import Check
 
 _ORDER = [
@@ -38,6 +44,7 @@ _ALL: list[Check] = [
     *checks_ws.CHECKS,
     *checks_static.CHECKS,
     *checks_inprocess.CHECKS,
+    *checks_live_probe.CHECKS,
 ]
 
 REGISTRY: dict[str, Check] = {c.id: c for c in _ALL}

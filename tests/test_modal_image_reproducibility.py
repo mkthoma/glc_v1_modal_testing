@@ -174,6 +174,27 @@ def test_core_gateway_routes_policy_checks_through_the_separated_function():
     assert "GLC_POLICY_ENGINE_REMOTE" in m.group(0)
 
 
+def test_adapter_shape_probe_function_exists():
+    """The findings console's L1/L3/L4 checks call this Function directly
+    to get a live-measured verdict instead of a documented assumption —
+    it has to actually exist in the deployed app for that to work."""
+    src = _source()
+    assert re.search(r'name="glc-adapter-shape-probe"', src)
+    assert "def adapter_shape_probe" in src
+
+
+def test_adapter_shape_probe_has_no_secret_and_uses_adapter_image():
+    """The whole point is proving nothing sensitive is reachable from an
+    adapter-shaped container — it must be built from adapter_image() (no
+    GLC_DATA_ENV) and carry no Secret, exactly like a real adapter."""
+    src = _source()
+    m = re.search(r"@app\.function\(image=adapter_image\([^\n]*?\)[^\n]*\)", src)
+    assert m, "could not locate the adapter-shape probe Function's decorator"
+    block = m.group(0)
+    assert "secrets=" not in block
+    assert "volumes=" not in block
+
+
 def test_telegram_egress_allowlist_is_configured():
     """Move D — telegram's Sandbox egress control must be an allowlist
     (specific domains), not the coarse all-or-nothing block_network flag
