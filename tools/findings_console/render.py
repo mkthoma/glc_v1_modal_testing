@@ -73,7 +73,7 @@ _STYLE = """
     padding-bottom: var(--sp-2); border-bottom: 1px solid var(--border);
   }
   h3 { font-size: .85rem; margin: 0 0 var(--sp-2); color: var(--text); font-weight: 600; }
-  .lede { color: var(--text-muted); font-size: .88rem; max-width: 72ch; margin-bottom: var(--sp-5); }
+  .lede { color: var(--text-muted); font-size: .88rem; margin-bottom: var(--sp-5); }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   a:focus-visible, button:focus-visible, input:focus-visible {
@@ -392,13 +392,13 @@ def dashboard(
     </form>
     """
     body = f"""
-    <h1>GLC v2 - Findings Console</h1>
+    <h1>GLC - Findings Console</h1>
     <p class="lede">Two real, separately deployed Modal apps, tested side by side: <b>before</b> is
     without_fixes/ (the pre-hardening baseline), <b>after</b> is with_fixes/ (the hardened gateway).
     Every "before" value in this dashboard comes from actually running the check against the deployed
     baseline — never a description of what used to be true. Findings are grouped by what the migration
     did to each one. Every run is logged and kept, with an "Attack command" box and a "How this is fixed"
-    box on each check's own page. Nothing runs automatically here.</p>
+    box on each check's own page.</p>
     {target_forms(before_target, after_target, before_note, after_note)}
     <div class="actions">{actions}</div>
     {sections_html}
