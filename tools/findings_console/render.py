@@ -100,6 +100,8 @@ _STYLE = """
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
   @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
 
+  .target-stack { display: flex; flex-direction: column; gap: var(--sp-2); }
+
   pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-sunken);
         border: 1px solid var(--border); padding: var(--sp-3); border-radius: var(--radius-sm);
         max-height: 280px; overflow: auto; font-size: .76rem; color: var(--text-muted); margin: var(--sp-3) 0 0; }
@@ -252,6 +254,7 @@ def _target_form(
         )
     note_html = f'<p class="meta" style="margin:0 0 var(--sp-2)">{e(note)}</p>' if note else ""
     return f"""
+<div>
 <form class="panel" method="post" action="/api/target/{slug}" style="border-top:3px solid {accent}">
   <h3>{e(heading)}</h3>
   <p class="meta" style="margin:0 0 var(--sp-2)">Auto-detected from <code>{e(modal_app_label)}</code> on startup — edit by hand only to override.</p>
@@ -273,6 +276,7 @@ def _target_form(
 <form method="post" action="/api/target/{slug}/autodetect" style="margin:calc(-1 * var(--sp-4)) 0 var(--sp-5)">
   <button type="submit" class="small">Re-detect from {e(modal_app_label)}</button>
 </form>
+</div>
 """
 
 
@@ -295,7 +299,7 @@ def target_forms(
         target=after_target,
         note=after_note,
     )
-    return f'<div class="grid2">{before}{after}</div>'
+    return f'<div class="target-stack">{before}{after}</div>'
 
 
 def _badge_cell(run: dict | None) -> str:
