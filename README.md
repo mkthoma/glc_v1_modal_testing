@@ -212,10 +212,10 @@ section is the summary.
    audit.sqlite and confirming `verify_chain()` catches it), input-range
    validation on cost-ledger writes, and an absolute configured path for
    the whisper_cpp binary instead of `PATH`-based resolution.
-7. **Regression-tested every fix** (171 tests, ~89% coverage on `glc/`,
-   well above the CI gate) and **redeployed after every hardening
-   commit**, re-confirming `/healthz` and the fix itself against the live
-   Modal deployment each time — not just locally.
+7. **Regression-tested every fix** (365+ tests, ~89% coverage on
+   `with_fixes/glc/`, well above the CI gate) and **redeployed after
+   every hardening commit**, re-confirming `/healthz` and the fix itself
+   against the live Modal deployment each time — not just locally.
 8. **Built a local testing dashboard** (`tools/findings_console/`) that
    automates the manual repro steps for all 22 findings against any
    target — see below.
@@ -252,31 +252,48 @@ section is the summary.
 
 ## Deploying the app
 
+The repo ships **two** deployable variants, so the findings console below
+can compare a real pre-hardening baseline against the real hardened
+gateway — not a description of what used to be true:
+
+- **`with_fixes/`** — the hardened gateway, every Part 1 fix applied.
+  This is the one you're actually working on.
+- **`without_fixes/`** — a frozen, untouched snapshot of the code exactly
+  as it was before Session 12's Modal migration and any of this
+  hardening. Never edit this — it exists only to give the findings
+  console something real to test findings *against* on the "before" side.
+
 ```bash
-uv run modal deploy modal_app.py
+uv run modal deploy with_fixes/modal_app.py
+uv run modal deploy without_fixes/modal_app.py
 ```
 
-Modal prints a public `*.modal.run` URL. Confirm the gateway booted:
+Modal prints a public `*.modal.run` URL for each. Confirm both booted:
 
 ```bash
-curl <printed-url>/healthz
+curl <with_fixes-url>/healthz
+curl <without_fixes-url>/healthz
 # {"ok": true, "port": 8111}
 ```
 
-Open `<printed-url>/docs` in a browser to see the interactive API surface
+Open `<with_fixes-url>/docs` in a browser to see the interactive API surface
 (when docs are enabled — see the A2 fix above for when they're disabled).
+`without_fixes` never gates `/docs`, since A2's fix doesn't exist there.
 
-Redeploy any time after a code change with the same `modal deploy`
-command — the Volume (audit log, pairing store, install token) survives
-redeploys; only the container image and code are refreshed.
+Redeploy `with_fixes/modal_app.py` any time after a code change with the
+same command — its Volume (audit log, pairing store, install token)
+survives redeploys; only the container image and code are refreshed.
+`without_fixes/modal_app.py` should never need redeploying, since its
+code never changes.
 
-To fetch the install token by hand (e.g. to `curl` the deployed gateway
-directly) — it's stored on the Volume, not on your machine. The findings
-console below auto-detects this for you; this is only for manual use:
+To fetch either app's install token by hand (e.g. to `curl` a deployed
+gateway directly) — each is stored on that app's own Volume, not on your
+machine. The findings console below auto-detects both for you; this is
+only for manual use:
 
 ```bash
-uv run modal volume get glc-data glc/install_token ./modal-install-token.txt
-cat ./modal-install-token.txt
+uv run modal volume get glc-data glc/install_token ./modal-install-token.txt              # with_fixes
+uv run modal volume get glc-data-baseline glc/install_token ./baseline-install-token.txt   # without_fixes
 ```
 
 ## Running the tests
@@ -285,11 +302,13 @@ cat ./modal-install-token.txt
 
 ```bash
 uv run pytest tests/ -m "not requires_live_api and not requires_models" \
-  --cov=glc --cov-report=term-missing --cov-fail-under=80
+  --cov=with_fixes/glc --cov-report=term-missing --cov-fail-under=80
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/validate_envelope.py
 uv run python scripts/validate_policy.py
 ```
+
+(`without_fixes/` is a frozen pre-hardening snapshot, excluded from lint/coverage on purpose — see its own note in `pyproject.toml`.)
 
 ### The findings console (pen-test dashboard)
 
@@ -298,139 +317,65 @@ the manual curl/WebSocket/in-process repro for all 22 findings above. It
 is never deployed to Modal, has no auth of its own, and should only ever
 be reached at `127.0.0.1`.
 
-**Only your deployed Modal gateway is a valid target** — there is no
-local-gateway option. This assignment hardens the deployed app, and most
-of these findings (A3–A4, L1, L3–L5, L8) are specifically about
-container/Secret separation that a local `uv run glc serve` process
-can't exercise at all.
+**Two real, separately deployed Modal apps, tested side by side —
+before and after.** `without_fixes/` (pre-hardening baseline) and
+`with_fixes/` (hardened gateway) are each deployed independently (see
+[Deploying the app](#deploying-the-app) above); the console tracks both
+as fixed, auto-detected targets named "before" and "after." There is no
+local-gateway option — this assignment hardens the *deployed* app, and
+most of these findings (A3–A4, L1, L3–L5, L8) are specifically about
+container/Secret separation a local `uv run glc serve` process can't
+exercise at all.
 
-**Start it** from the repo root, after you've deployed (`modal deploy modal_app.py`):
+**Start it** from the repo root, after you've deployed both apps:
 
 ```bash
 uv run python -m tools.findings_console.server
 ```
 
 Serves the dashboard at `http://127.0.0.1:8811`. **No copy-pasting a URL
-or token** — on startup the console parses `modal_app.py` for the App
-name, ASGI function name, Volume name, and config path, then asks the
-Modal SDK for that Function's live `*.modal.run` URL and reads the
-install token straight out of the Volume, using the same Modal auth you
-deployed with. If the app isn't deployed yet, the target form explains
-what's missing; click **Re-detect from modal_app.py** to retry once it
-is, or after a fresh redeploy. `GLC_MODAL_URL`/`GLC_MODAL_INSTALL_TOKEN`
-(or typing into the form) overrides auto-detection if you want to point
-somewhere else.
+or token, for either target** — on startup the console parses each
+`modal_app.py` for its App name, ASGI function name, Volume name, and
+config path, then asks the Modal SDK for that Function's live
+`*.modal.run` URL and reads its install token straight out of its own
+Volume. If an app isn't deployed yet, that target's form explains what's
+missing; click its own **Re-detect** button to retry once it is.
 
 **Using it:**
 
-- Every check starts as `no runs` — nothing runs on its own. Click **Run**
-  on a row to fire one check, or **Run all checks** to fire every check
-  in one pass (this can take up to a minute — the SSRF and rate-limit
-  checks fire multiple slow requests against your live deployment).
-- Hover any `INV-n`, `ARn`, or check-kind label for its full meaning; a
-  legend at the bottom of the dashboard spells all of them out too,
-  including a **Verdict codes** legend that defines `closed` vs.
-  `mitigated` precisely (see below).
-- Each run is classified `vulnerable`, `mitigated`, `closed`, `manual`
-  (needs something the tool can't supply, usually an install token), or
-  `error` (the check itself failed to run — not a verdict on the finding).
-  **`closed`** means the check directly confirmed the demonstrated attack
-  now fails, unconditionally, for the attacker role it names — a
-  *stronger* role it doesn't exercise may still have a route (check
-  `FINDINGS.md`). **`mitigated`** means either the attack (or an
-  equally-easy alternate route to the same outcome) still succeeds but
-  the check verified real progress (reduced impact, or the tamper is now
-  detected), or the check is a heuristic that can't fully confirm closure
-  on its own.
-- Every check's own page (`/check/<id>`) has an **Attack command** box —
-  the literal `curl`/Python that reproduces it, with your target's URL
-  and token already filled in — and a **How this is fixed** box naming
-  the actual file and mechanism.
-- Click into any check to see, per target, the earliest recorded run next
-  to the latest — a before/after comparison. Pin a specific run as the
-  baseline if the true "before" state wasn't the first attempt.
+- Every check starts as `no runs` — nothing runs on its own. Click
+  **▶ before** / **▶ after** on a row to fire one check against one
+  target, or **Run all checks (before + after)** to fire every check
+  against both (roughly two minutes total — C1's SSRF probe and L8's
+  self-kill probe are the slow ones, per target).
+- Every check's **before** column should read `vulnerable` and **after**
+  should read `closed`/`mitigated` — that agreement across two
+  independently deployed apps *is* the proof the fixes work, verified
+  live, not just documentation saying so.
+- Click into any check to see a **Before vs. after** block: the before
+  target's most recent run next to the after target's, with each side's
+  actual evidence. Every check's own page also has an **Attack command**
+  box (the literal `curl`/Python that reproduces it) and a **How this is
+  fixed** box naming the actual file and mechanism.
 - `GET /api/export.md` dumps the whole log as a Markdown starting point
   for a findings report, organized the same way this README groups
-  findings (A/B/C/ten-leaks), each entry leading with its invariant and
-  attacker-role sentence spelled out in full.
-- Every run is stamped with the local checkout's current git commit, so
-  once a check reaches `closed` or `mitigated` you can see exactly which
-  commit fixed it.
+  findings (A/B/C/ten-leaks).
 
-**What each check kind actually exercises:**
+**Verdict codes** — `vulnerable` (attack succeeded), `mitigated` (real
+progress verified, but the attack or an equally-easy alternate route
+still works, or the check is a heuristic that can't fully confirm
+closure alone), `closed` (the check directly confirmed the attack now
+fails, unconditionally, for the attacker role it names — a *stronger*
+role it doesn't exercise may still have a route), `manual` (needs
+something the tool can't supply, usually a token), `error` (the check
+itself failed to run — not a verdict on the finding).
 
-| Kind | Runs against | Findings | Notes |
-|---|---|---|---|
-| `http` | `target.base_url` | A1, A2, C1, C4, C5, C6 | your deployed `*.modal.run` gateway |
-| `ws` | `target.base_url` | C2 (=L9), C3 | same, over WebSocket |
-| `live_probe` | calls a deployed Function via the Modal SDK | L1, L3, L4, L8 | ignores `base_url` for the call itself (L8 also checks `/healthz` on it) — calls a deployed Function by name, not an HTTP endpoint; requires the app deployed with that Function present |
-| `inprocess` | your local checkout only | L2, L5, L10 | spawns an isolated subprocess importing the local `glc` package; ignores `base_url` |
-| `static` | your local checkout only | A3, A4, A5, A6, L6, L7 | reads `modal_app.py`/source files directly; ignores `base_url` |
-
-`inprocess` and `static` checks can never observe a live Modal
-container from outside it, so they always report on your local working
-directory. If you've fixed the code but not redeployed, these can show
-`closed` while `http`/`ws` checks against the stale deployment still show
-`vulnerable` — that's expected, not a bug.
-
-**Known limitations of the dashboard** (found by actually running it
-against a live gateway):
-
-- **L1, L3, L4, L8 now report `closed` for real, verified live against
-  your deployment — not a documented assumption.** `modal_app.py` deploys
-  `glc-adapter-shape-probe` (env/pairing/token checks) and
-  `glc-adapter-shape-self-kill-probe` (a separate Function so a self-kill
-  test never risks the read-only ones), both built with the exact same
-  container shape as a real catalogue adapter (no LLM Secret, no Volume
-  mount). These four checks call them directly and report what they
-  actually observe; L8 also confirms `/healthz` stays healthy immediately
-  before and after the self-kill, and takes ~25-30s rather than being
-  instant. Requires the app deployed with these Functions present (any
-  `modal deploy modal_app.py` after this fix landed) — otherwise they
-  report `error`, not a guess either way.
-- **L5 reports `mitigated`, not `vulnerable`, once `glc/policy/engine.py`'s
-  hardening is deployed.** The exact one-liner the finding names
-  (`glc.policy.engine.evaluate = lambda ...`) now raises `AttributeError`
-  — `PolicyEngine` gets `__slots__` and the module's `__class__` is
-  swapped to reject external reassignment of `evaluate`/`get_engine`/
-  `reload_engine`. Still not `closed`: the identical outcome is one line
-  away via `sys.modules['glc.policy.engine'].__dict__['evaluate'] = ...`,
-  which bypasses that check entirely and is exactly as easy for the same
-  attacker. The separated, un-monkey-patchable `glc-policy-engine`
-  Function is immune to both techniques and deployed, but nothing calls
-  it yet — see its `FINDINGS.md` entry.
-
-  L1/L3/L4/L8/L5 all remain open for an attacker with code execution
-  inside the gateway process itself, since that process still holds the
-  real Volume-backed data (or, for L5, the same module) those checks
-  protect — a different, harder rung than what container separation or
-  a `__setattr__` guard alone defends.
-- C4 (verbose errors) under-reports as `closed` if the target has zero
-  provider keys configured — set at least one mock key so a real
-  upstream attempt actually happens.
-- C1 (SSRF) is a text-matching heuristic (looks for "block" in a `400`
-  response body), not a network-level oracle — read the evidence panel
-  yourself too.
-- C2/L9 requires both the route channel and the spoofed channel to be
-  `enabled: true` in `channels.yaml`.
-- C5 fires up to 35 rapid requests and C6 up to 20 — against your real
-  deployed gateway, since that's the only target this console has. Expect
-  this to briefly drive real (if tiny) usage.
-- **C5's and C6's rate limits/lockouts are global, not per-check, and can
-  affect C2/L9's own setup step (its first run only, now).** C2/L9 pairs
-  a probe identity via `/v1/control/pair`/`/pair/confirm` before it can
-  test anything — and glc/security/pairing.py's confirm-attempt lockout
-  is a single global counter, deliberately not scoped per identity
-  (scoping it would let a real attacker just rotate identities to reset
-  their own lockout). If C6 (20 wrong codes) tripped that lockout right
-  before C2/L9's *first-ever* pairing attempt, that attempt hits a
-  legitimate `429`. The console now guards against this two ways: it
-  checks `/v1/control/presence` first and skips pairing entirely once
-  the probe is already paired from an earlier run — so this can only
-  ever happen on the very first run, never on repeats — and if it does
-  happen, reports a clear `error` naming C6 and the 5-minute window
-  instead of a bare exception. Re-run C2/L9 once after the window
-  passes; every run after that is immune.
+Full detail — exactly what each check kind does for "before" vs.
+"after" (HTTP/WS checks just hit a different deployed URL; `inprocess`
+checks import `with_fixes/glc` or `without_fixes/glc`; `static`/
+`live_probe` checks read or call the matching variant's `modal_app.py`),
+every known limitation, and the full package layout — lives in
+[`tools/findings_console/README.md`](tools/findings_console/README.md).
 
 Stop the console with **Ctrl+C** — a force-kill just leaves port 8811
 bound until the next startup's port-guard clears it.
@@ -438,11 +383,15 @@ bound until the next startup's port-guard clears it.
 ## Repository layout
 
 ```
-glc/                        the gateway itself (routes, policy, audit, channels, voice, security)
-modal_app.py                 Modal deployment wrapper — image, Volume, Secret, the served ASGI app
+with_fixes/                  the hardened gateway — this is the one you work on
+  glc/                         the gateway itself (routes, policy, audit, channels, voice, security)
+  modal_app.py                 Modal deployment wrapper — image, Volume, Secret, the served ASGI app
+without_fixes/                frozen pre-hardening snapshot — deployed as the findings console's "before"
+  glc/                         byte-identical to the code before Session 12's Modal migration; never edit
+  modal_app.py                 same original simple wrapper, distinct App/Volume names so it coexists
 FINDINGS.md                  per-finding write-up: invariant, attacker role, before/after, commit
 tools/findings_console/      the local pen-test dashboard described above
-tests/                       regression test suite
+tests/                       regression test suite (targets with_fixes/glc)
 scripts/                     CI-parity validation scripts (envelope shape, policy load)
 daemon/                      local daemonisation helpers (launchd/systemd/NSSM)
 docs/                        architecture and adapter/voice guides

@@ -226,54 +226,87 @@ def _page(title: str, body: str) -> str:
 <body><main>{body}</main></body></html>"""
 
 
-def target_form(target: Target) -> str:
+def _target_form(
+    *,
+    slug: str,
+    heading: str,
+    modal_app_label: str,
+    accent: str,
+    target: Target,
+    note: str,
+) -> str:
+    """One before/after target's form. `slug` is "before" or "after" —
+    drives the /api/target/{slug} and /api/target/{slug}/autodetect
+    endpoints, both fixed-name targets (never arbitrarily renamed) so
+    the dashboard can reliably compare "the before result" against
+    "the after result" for every check."""
     needs_url = not target.base_url or "localhost" in target.base_url or "127.0.0.1" in target.base_url
     warning = ""
     if needs_url:
         warning = (
-            '<p class="meta" style="margin:0 0 var(--sp-3);color:#fca5a5">'
-            "No deployed Modal URL configured yet. Click <b>Re-detect from modal_app.py</b> below once "
-            "you've run <code>modal deploy modal_app.py</code> — it reads the app/function/Volume names "
-            "straight out of that file and looks the rest up via the Modal SDK, no pasting required. "
-            "Only the deployed gateway is what this assignment is actually testing."
-            "</p>"
+            f'<p class="meta" style="margin:0 0 var(--sp-3);color:#fca5a5">'
+            f"No deployed Modal URL configured yet. Click <b>Re-detect</b> below once you've run "
+            f"<code>modal deploy {e(modal_app_label)}</code> — it reads the app/function/Volume names "
+            f"straight out of that file and looks the rest up via the Modal SDK, no pasting required."
+            f"</p>"
         )
+    note_html = f'<p class="meta" style="margin:0 0 var(--sp-2)">{e(note)}</p>' if note else ""
     return f"""
-<form class="panel" method="post" action="/api/target">
-  <h3>Target — your deployed Modal gateway</h3>
-  <p class="meta" style="margin:0 0 var(--sp-3)">HTTP and WebSocket checks run against this URL. In-process and static checks never use it — they inspect this local checkout / run a throwaway local subprocess by design, to demonstrate code that runs inside the gateway's own process (see the "Check kinds" legend below). Auto-detected from <code>modal_app.py</code> on startup — edit by hand only if you want to override that, e.g. to point at a different environment.</p>
+<form class="panel" method="post" action="/api/target/{slug}" style="border-top:3px solid {accent}">
+  <h3>{e(heading)}</h3>
+  <p class="meta" style="margin:0 0 var(--sp-2)">Auto-detected from <code>{e(modal_app_label)}</code> on startup — edit by hand only to override.</p>
+  {note_html}
   {warning}
-  <div class="form-row">
+  <div class="form-row" style="grid-template-columns:3fr 2fr auto">
     <div>
-      <label for="target-name">Name</label>
-      <input id="target-name" type="text" name="name" value="{e(target.name)}">
+      <label for="{slug}-url">Base URL (your *.modal.run URL)</label>
+      <input id="{slug}-url" type="text" name="base_url" value="{e(target.base_url)}" placeholder="https://your-workspace--{e(slug)}.modal.run">
     </div>
     <div>
-      <label for="target-url">Base URL (your *.modal.run URL)</label>
-      <input id="target-url" type="text" name="base_url" value="{e(target.base_url)}" placeholder="https://your-workspace--glc-v1-gateway-fastapi-app.modal.run">
-    </div>
-    <div>
-      <label for="target-token">Install token</label>
-      <input id="target-token" type="text" name="install_token" value="{e(target.install_token or "")}"
+      <label for="{slug}-token">Install token</label>
+      <input id="{slug}-token" type="text" name="install_token" value="{e(target.install_token or "")}"
              placeholder="needed for C2, C3, C6">
     </div>
-    <div><button type="submit" class="primary">Set target</button></div>
+    <div><button type="submit" class="primary">Set</button></div>
   </div>
 </form>
-<form method="post" action="/api/target/autodetect" style="margin:calc(-1 * var(--sp-4)) 0 var(--sp-5)">
-  <button type="submit">Re-detect from modal_app.py</button>
-  <span class="meta">Reads modal_app.py, looks up the deployed Function's URL and the Volume's install token, and overwrites both fields above — use after a fresh <code>modal deploy</code>.</span>
+<form method="post" action="/api/target/{slug}/autodetect" style="margin:calc(-1 * var(--sp-4)) 0 var(--sp-5)">
+  <button type="submit" class="small">Re-detect from {e(modal_app_label)}</button>
 </form>
 """
 
 
-def _check_row(label: str, c: Check, latest: dict[str, dict]) -> str:
-    run = latest.get(c.id)
+def target_forms(
+    before_target: Target, after_target: Target, before_note: str = "", after_note: str = ""
+) -> str:
+    before = _target_form(
+        slug="before",
+        heading='← "before" target — pre-hardening baseline (without_fixes/)',
+        modal_app_label="without_fixes/modal_app.py",
+        accent="var(--danger)",
+        target=before_target,
+        note=before_note,
+    )
+    after = _target_form(
+        slug="after",
+        heading='"after" target → hardened gateway (with_fixes/)',
+        modal_app_label="with_fixes/modal_app.py",
+        accent="var(--success)",
+        target=after_target,
+        note=after_note,
+    )
+    return f'<div class="grid2">{before}{after}</div>'
+
+
+def _badge_cell(run: dict | None) -> str:
     if run:
-        badge = _badge(Verdict(run["verdict"]))
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(run["ts"]))
-    else:
-        badge, when = '<span class="badge neutral">no runs</span>', "-"
+        return _badge(Verdict(run["verdict"]))
+    return '<span class="badge neutral">no runs</span>'
+
+
+def _check_row(label: str, c: Check, before_latest: dict[str, dict], after_latest: dict[str, dict]) -> str:
+    before_run = before_latest.get(c.id)
+    after_run = after_latest.get(c.id)
     id_cell = (
         f'<a href="/check/{e(c.id)}">{e(label)}</a>'
         if label == c.id
@@ -285,22 +318,25 @@ def _check_row(label: str, c: Check, latest: dict[str, dict]) -> str:
       <td>{_inv_html(c.invariant)}</td>
       <td>{_ar_html(c.attacker_role)}</td>
       <td>{_kind_html(c.kind.value)}</td>
-      <td>{badge}</td>
-      <td class="meta">{e(when)}</td>
+      <td>{_badge_cell(before_run)}</td>
+      <td>{_badge_cell(after_run)}</td>
       <td>
-        <form method="post" action="/api/run/{e(c.id)}">
-          <button type="submit" class="small">Run</button>
+        <form method="post" action="/api/run_before/{e(c.id)}" style="display:inline">
+          <button type="submit" class="small" title="Run against the before/baseline target">▶ before</button>
+        </form>
+        <form method="post" action="/api/run/{e(c.id)}" style="display:inline">
+          <button type="submit" class="small" title="Run against the after/hardened target">▶ after</button>
         </form>
       </td>
     </tr>"""
 
 
-def _section_block(section: Section, latest: dict[str, dict]) -> str:
-    rows = "".join(_check_row(item.label, item.check, latest) for item in section.items)
+def _section_block(section: Section, before_latest: dict[str, dict], after_latest: dict[str, dict]) -> str:
+    rows = "".join(_check_row(item.label, item.check, before_latest, after_latest) for item in section.items)
     return f"""
     <h2 class="section-heading">{e(section.title)}</h2>
     <div class="table-wrap"><table>
-      <tr><th>id</th><th>title</th><th>invariant</th><th>attacker</th><th>kind</th><th>latest</th><th>last run</th><th></th></tr>
+      <tr><th>id</th><th>title</th><th>invariant</th><th>attacker</th><th>kind</th><th>before</th><th>after</th><th></th></tr>
       {rows}
     </table></div>"""
 
@@ -326,15 +362,24 @@ def _legend_tables() -> str:
 
 def dashboard(
     checks: list[Check],
-    latest: dict[str, dict],
-    target: Target,
-    gateway_note: str = "",
+    before_latest: dict[str, dict],
+    after_latest: dict[str, dict],
+    before_target: Target,
+    after_target: Target,
+    before_note: str = "",
+    after_note: str = "",
 ) -> str:
     registry = {c.id: c for c in checks}
-    sections_html = "".join(_section_block(s, latest) for s in build_sections(registry))
+    sections_html = "".join(_section_block(s, before_latest, after_latest) for s in build_sections(registry))
     actions = """
+    <form method="post" action="/api/run_all_both">
+      <button type="submit" class="primary">Run all checks (before + after)</button>
+    </form>
+    <form method="post" action="/api/run_all_before">
+      <button type="submit">Run all (before only)</button>
+    </form>
     <form method="post" action="/api/run_all">
-      <button type="submit" class="primary">Run all checks</button>
+      <button type="submit">Run all (after only)</button>
     </form>
     <a href="/api/export.md"><button type="button">Export FINDINGS.md draft</button></a>
     <form method="post" action="/api/clear"
@@ -342,17 +387,15 @@ def dashboard(
       <button type="submit" class="danger">Clear all history</button>
     </form>
     """
-    status = f'<div class="panel notice">{e(gateway_note)}</div>' if gateway_note else ""
     body = f"""
     <h1>GLC v2 - Findings Console</h1>
-    <p class="lede">The dashboard itself runs locally, but every HTTP/WS check below fires at your
-    <b>deployed Modal gateway</b> — set its URL below. Findings are grouped by what the migration did to
-    each one: introduced by the move to Modal, inherited but not yet closed, or inherited and now
-    reachable over the internet. Every run is logged and kept, with an "Attack command" box and a "How
-    this is fixed" box on each check's own page. Nothing runs automatically here. Click Run on a row, or
-    Run all checks, whenever you are ready.</p>
-    {status}
-    {target_form(target)}
+    <p class="lede">Two real, separately deployed Modal apps, tested side by side: <b>before</b> is
+    without_fixes/ (the pre-hardening baseline), <b>after</b> is with_fixes/ (the hardened gateway).
+    Every "before" value in this dashboard comes from actually running the check against the deployed
+    baseline — never a description of what used to be true. Findings are grouped by what the migration
+    did to each one. Every run is logged and kept, with an "Attack command" box and a "How this is fixed"
+    box on each check's own page. Nothing runs automatically here.</p>
+    {target_forms(before_target, after_target, before_note, after_note)}
     <div class="actions">{actions}</div>
     {sections_html}
     {_legend_tables()}
@@ -468,11 +511,28 @@ def _fix_box(check: Check) -> str:
     </div>"""
 
 
+def _baseline_vs_hardened_block(before_run: dict | None, after_run: dict | None) -> str:
+    """The dashboard's actual point: this check's real, live result
+    against the deployed pre-hardening baseline next to its real, live
+    result against the deployed hardened gateway — two separate Modal
+    apps, not a guess about "what used to be true." Distinct from the
+    generic per-target history below, which tracks any target's own
+    timeline (useful across redeploys of the *same* app)."""
+    return f"""
+    <div class="compare-target">before (baseline) vs. after (hardened) — each side is that target's most recent run</div>
+    <div class="grid2">
+      {_compare_card("before", before_run)}
+      {_compare_card("after", after_run)}
+    </div>"""
+
+
 def check_detail(
     check: Check,
     history: list[dict],
     per_target: list[tuple[str, dict | None, dict | None, int | None]],
     target: Target,
+    before_run: dict | None = None,
+    after_run: dict | None = None,
 ) -> str:
     if per_target:
         before_after = "".join(
@@ -516,16 +576,22 @@ def check_detail(
     {_command_box(check, target)}
     {_fix_box(check)}
     <div class="actions">
+      <form method="post" action="/api/run_before/{e(check.id)}">
+        <button type="submit">Run now (before / baseline)</button>
+      </form>
       <form method="post" action="/api/run/{e(check.id)}">
-        <button type="submit" class="primary">Run now against current target</button>
+        <button type="submit" class="primary">Run now (after / hardened)</button>
       </form>
       <form method="post" action="/api/clear/{e(check.id)}"
             onsubmit="return confirm('Delete all history and any pinned baseline for {e(check.id)}, across every target? This cannot be undone.')">
         <button type="submit" class="danger">Clear history for this check</button>
       </form>
     </div>
+    <h2 class="section-heading">Before vs. after</h2>
+    <div class="compare-wrap">{_baseline_vs_hardened_block(before_run, after_run)}</div>
+    <h2 class="section-heading">Full history by target ({len(history)} run(s) total) - pin any row as its target's own baseline</h2>
+    <p class="meta" style="margin:0 0 var(--sp-3)">Tracks each target's own timeline across re-runs/redeploys — separate from the before/after comparison above.</p>
     <div class="compare-wrap">{before_after}</div>
-    <h2 class="section-heading">Full history ({len(history)} run(s)) - pin any row as the before baseline</h2>
     {hist_table}
     """
     return _page(f"{check.id} — {check.title}", body)

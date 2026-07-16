@@ -6,30 +6,38 @@ Run with:
 Serves the dashboard on 127.0.0.1:8811. Nothing runs until you click
 Run or Run all checks yourself; there is no automatic run-on-startup.
 
-Only your deployed Modal gateway is a valid target for the HTTP/WS
-checks — this assignment is about the deployed app, not a local `uv
-run glc serve` stand-in, so there is no local-gateway autostart or
-"local" target option here. On startup, the console auto-detects your
-deployed gateway's URL and install token directly from `modal_app.py`
-(app name, ASGI function name, Volume name, config path) and a live
-lookup against the Modal SDK — no pasting required, as long as you've
-already run `modal deploy modal_app.py` and are logged into the same
-Modal account this console runs under. If that lookup fails (app not
-deployed yet, no local Modal auth), the target form starts empty with
-an explanation, and a **Re-detect from modal_app.py** button is always
+Tracks exactly two fixed, named Modal targets, both auto-detected —
+never a local `uv run glc serve` stand-in, since this assignment is
+about the deployed app:
+
+  - "before"  — without_fixes/modal_app.py, the pre-hardening baseline
+  - "after"   — with_fixes/modal_app.py, the hardened gateway
+
+On startup, the console auto-detects each target's URL and install
+token directly from its own modal_app.py (app name, ASGI function
+name, Volume name, config path) and a live lookup against the Modal
+SDK — no pasting required, as long as you've deployed both
+(`modal deploy without_fixes/modal_app.py` and
+`modal deploy with_fixes/modal_app.py`) and are logged into the same
+Modal account this console runs under. If a lookup fails (that app
+isn't deployed yet, no local Modal auth), that target's form starts
+empty with an explanation, and its own **Re-detect** button is always
 available once you have deployed. In-process and static checks never
-use the target at all; they always run a local subprocess / read this
-local checkout, by design (see the "Check kinds" legend on the
-dashboard).
+use `target.base_url` for their HTTP calls, but they DO pick which
+local checkout / which glc package to read or import based on which
+target ("before" vs "after") they're running for — see the "Check
+kinds" legend on the dashboard.
 
 Never deploy this console itself — it has no auth of its own and
 isn't meant to be reachable by anyone but you, on your own machine.
 
 Environment variables:
-    GLC_MODAL_URL=<url>             pre-fill the target's base_url with your deployed *.modal.run URL
-    GLC_MODAL_INSTALL_TOKEN=<token> pre-fill the target's install_token
-    FINDINGS_CONSOLE_DB=<path>      override the SQLite log location
-    FINDINGS_CONSOLE_FORCE_PORTS=0  don't force-kill a stale console process on 8811
+    GLC_MODAL_URL=<url>                      pre-fill the "after" target's base_url
+    GLC_MODAL_INSTALL_TOKEN=<token>           pre-fill the "after" target's install_token
+    GLC_MODAL_BASELINE_URL=<url>              pre-fill the "before" target's base_url
+    GLC_MODAL_BASELINE_INSTALL_TOKEN=<token>  pre-fill the "before" target's install_token
+    FINDINGS_CONSOLE_DB=<path>                override the SQLite log location
+    FINDINGS_CONSOLE_FORCE_PORTS=0            don't force-kill a stale console process on 8811
 """
 
 from __future__ import annotations
@@ -113,52 +121,90 @@ def _free_port(port: int) -> list[int]:
     return killed
 
 
-def _initial_target() -> Target:
-    """Prefer whatever the operator already told us about their deployed
-    Modal gateway (env vars set once in the shell, or in .env); otherwise
+def _initial_after_target() -> Target:
+    """Prefer whatever the operator already told us about the hardened
+    deployment (env vars set once in the shell, or in .env); otherwise
     start empty and let the target form's own warning prompt for it."""
     base_url = os.getenv("GLC_MODAL_URL", "")
     token = os.getenv("GLC_MODAL_INSTALL_TOKEN") or None
-    return Target(name="modal", base_url=base_url, install_token=token)
+    return Target(name="after", base_url=base_url, install_token=token)
+
+
+def _initial_before_target() -> Target:
+    base_url = os.getenv("GLC_MODAL_BASELINE_URL", "")
+    token = os.getenv("GLC_MODAL_BASELINE_INSTALL_TOKEN") or None
+    return Target(name="before", base_url=base_url, install_token=token)
 
 
 _state: dict[str, object] = {
-    "target": _initial_target(),
-    "gateway_note": "",
+    "after_target": _initial_after_target(),
+    "before_target": _initial_before_target(),
+    "after_note": "",
+    "before_note": "",
 }
 
 
-def _current_target() -> Target:
-    target = _state["target"]
+def _after_target() -> Target:
+    target = _state["after_target"]
     assert isinstance(target, Target)
     return target
 
 
-async def _try_autodetect(*, force: bool = False) -> None:
-    """Fill in whichever of base_url/install_token are still missing by
-    asking Modal directly (see modal_detect.py) — parses modal_app.py
-    for the app/function/Volume names, then looks up the deployed
-    Function's web URL and reads the install token out of the Volume.
-    Never overwrites a value the operator already set unless `force` is
-    passed (the manual "Re-detect" button uses force=True to refresh
-    after a redeploy)."""
-    current = _current_target()
+def _before_target() -> Target:
+    target = _state["before_target"]
+    assert isinstance(target, Target)
+    return target
+
+
+# Back-compat alias — most of the console (single-check runs, export,
+# the generic per-target history view) still means "the hardened
+# deployment" whenever it says "the current target."
+_current_target = _after_target
+
+
+async def _try_autodetect_after(*, force: bool = False) -> None:
+    """Fill in whichever of base_url/install_token are still missing for
+    the "after" (hardened) target by asking Modal directly (see
+    modal_detect.py) — parses with_fixes/modal_app.py for the
+    app/function/Volume names, then looks up the deployed Function's web
+    URL and reads the install token out of the Volume. Never overwrites
+    a value the operator already set unless `force` is passed (the
+    manual "Re-detect" button uses force=True to refresh after a
+    redeploy)."""
+    current = _after_target()
     need_url = force or not current.base_url
     need_token = force or not current.install_token
     if not need_url and not need_token:
-        _state["gateway_note"] = "target already fully configured — nothing to auto-detect"
+        _state["after_note"] = "target already fully configured — nothing to auto-detect"
         return
-    url, token, note = await modal_detect.autodetect_target()
+    url, token, note = await modal_detect.autodetect_target(modal_detect.WITH_FIXES_MODAL_APP)
     final_url = url if (need_url and url) else current.base_url
     final_token = token if (need_token and token) else current.install_token
-    _state["target"] = Target(name=current.name or "modal", base_url=final_url, install_token=final_token)
-    _state["gateway_note"] = note
+    _state["after_target"] = Target(name="after", base_url=final_url, install_token=final_token)
+    _state["after_note"] = note
+
+
+async def _try_autodetect_before(*, force: bool = False) -> None:
+    """Same as _try_autodetect_after, but for the "before" (baseline)
+    target — reads without_fixes/modal_app.py instead."""
+    current = _before_target()
+    need_url = force or not current.base_url
+    need_token = force or not current.install_token
+    if not need_url and not need_token:
+        _state["before_note"] = "target already fully configured — nothing to auto-detect"
+        return
+    url, token, note = await modal_detect.autodetect_target(modal_detect.WITHOUT_FIXES_MODAL_APP)
+    final_url = url if (need_url and url) else current.base_url
+    final_token = token if (need_token and token) else current.install_token
+    _state["before_target"] = Target(name="before", base_url=final_url, install_token=final_token)
+    _state["before_note"] = note
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init_db()
-    await _try_autodetect()
+    await _try_autodetect_after()
+    await _try_autodetect_before()
     yield
 
 
@@ -168,32 +214,44 @@ app = FastAPI(title="GLC v2 Findings Console", lifespan=lifespan)
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> str:
     checks = ordered_checks()
-    latest = store.latest_per_check()
+    before_latest = {c.id: r for c in checks if (r := store.latest_for_target(c.id, "before")) is not None}
+    after_latest = {c.id: r for c in checks if (r := store.latest_for_target(c.id, "after")) is not None}
     return render.dashboard(
         checks,
-        latest,
-        _current_target(),
-        gateway_note=str(_state["gateway_note"]),
+        before_latest,
+        after_latest,
+        _before_target(),
+        _after_target(),
+        before_note=str(_state["before_note"]),
+        after_note=str(_state["after_note"]),
     )
 
 
-@app.post("/api/target")
-async def set_target(
-    name: str = Form(...),
-    base_url: str = Form(...),
-    install_token: str = Form(""),
-) -> RedirectResponse:
-    _state["target"] = Target(
-        name=name.strip() or "target",
-        base_url=base_url.rstrip("/"),
-        install_token=install_token.strip() or None,
+@app.post("/api/target/after")
+async def set_after_target(base_url: str = Form(...), install_token: str = Form("")) -> RedirectResponse:
+    _state["after_target"] = Target(
+        name="after", base_url=base_url.rstrip("/"), install_token=install_token.strip() or None
     )
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.post("/api/target/autodetect")
-async def autodetect_target() -> RedirectResponse:
-    await _try_autodetect(force=True)
+@app.post("/api/target/before")
+async def set_before_target(base_url: str = Form(...), install_token: str = Form("")) -> RedirectResponse:
+    _state["before_target"] = Target(
+        name="before", base_url=base_url.rstrip("/"), install_token=install_token.strip() or None
+    )
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/target/after/autodetect")
+async def autodetect_after_target() -> RedirectResponse:
+    await _try_autodetect_after(force=True)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/target/before/autodetect")
+async def autodetect_before_target() -> RedirectResponse:
+    await _try_autodetect_before(force=True)
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -213,7 +271,9 @@ async def check_detail(check_id: str) -> HTMLResponse:
         )
         for name in store.targets_for_check(check_id)
     ]
-    return HTMLResponse(render.check_detail(check, hist, per_target, _current_target()))
+    before_run = store.latest_for_target(check_id, "before")
+    after_run = store.latest_for_target(check_id, "after")
+    return HTMLResponse(render.check_detail(check, hist, per_target, _after_target(), before_run, after_run))
 
 
 @app.post("/api/pin/{check_id}")
@@ -252,16 +312,44 @@ async def run_one(check_id: str) -> RedirectResponse:
     checks = {c.id: c for c in ordered_checks()}
     check = checks.get(check_id)
     if check is not None:
-        await run_in_threadpool(runner.run_check, check, _current_target())
+        await run_in_threadpool(runner.run_check, check, _after_target())
+    return RedirectResponse(url=f"/check/{check_id}", status_code=303)
+
+
+@app.post("/api/run_before/{check_id}")
+async def run_one_before(check_id: str) -> RedirectResponse:
+    checks = {c.id: c for c in ordered_checks()}
+    check = checks.get(check_id)
+    if check is not None:
+        await run_in_threadpool(runner.run_check, check, _before_target())
     return RedirectResponse(url=f"/check/{check_id}", status_code=303)
 
 
 @app.post("/api/run_all")
 async def run_all() -> RedirectResponse:
     checks = ordered_checks()
-    target = _current_target()
+    target = _after_target()
     for c in checks:
         await run_in_threadpool(runner.run_check, c, target)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/run_all_before")
+async def run_all_before() -> RedirectResponse:
+    checks = ordered_checks()
+    target = _before_target()
+    for c in checks:
+        await run_in_threadpool(runner.run_check, c, target)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/run_all_both")
+async def run_all_both() -> RedirectResponse:
+    checks = ordered_checks()
+    before, after = _before_target(), _after_target()
+    for c in checks:
+        await run_in_threadpool(runner.run_check, c, before)
+        await run_in_threadpool(runner.run_check, c, after)
     return RedirectResponse(url="/", status_code=303)
 
 

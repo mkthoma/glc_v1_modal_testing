@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+WITH_FIXES_ROOT = REPO_ROOT / "with_fixes"
+WITHOUT_FIXES_ROOT = REPO_ROOT / "without_fixes"
 
 # The line-oriented protocol every snippet must follow: print exactly one
 # line starting with this prefix, containing the verdict token, so the
@@ -39,7 +41,18 @@ class HarnessRun:
     timed_out: bool
 
 
-def run_snippet(snippet: str, timeout: float = 15.0, extra_env: dict[str, str] | None = None) -> HarnessRun:
+def run_snippet(
+    snippet: str,
+    timeout: float = 15.0,
+    extra_env: dict[str, str] | None = None,
+    glc_root: Path = WITH_FIXES_ROOT,
+) -> HarnessRun:
+    """Runs `snippet` in a subprocess that imports `glc` from `glc_root`
+    (its parent directory goes on PYTHONPATH ahead of anything else, so
+    it shadows the editable-installed with_fixes/glc when glc_root is
+    without_fixes/ — the "before" baseline has no in-process mitigation
+    at all, so these checks show the original vulnerable behavior
+    against it, same snippet, no code duplicated per variant)."""
     scratch = Path(tempfile.mkdtemp(prefix="glc-findings-console-"))
     env = dict(os.environ)
     env["GLC_CONFIG_DIR"] = str(scratch)
@@ -47,7 +60,7 @@ def run_snippet(snippet: str, timeout: float = 15.0, extra_env: dict[str, str] |
     env["GLC_PAIRING_DB"] = str(scratch / "pairings.sqlite")
     env["GLC_GATEWAY_DB"] = str(scratch / "gateway.sqlite")
     env["GEMINI_API_KEY"] = env.get("GEMINI_API_KEY", "mock-key-findings-console")
-    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(glc_root) + os.pathsep + env.get("PYTHONPATH", "")
     if extra_env:
         env.update(extra_env)
 

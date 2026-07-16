@@ -16,10 +16,32 @@ MITIGATED from a local run.
 
 from __future__ import annotations
 
-from tools.findings_console.harness import HarnessRun, run_snippet
+from pathlib import Path
+
+from tools.findings_console.harness import (
+    WITH_FIXES_ROOT,
+    WITHOUT_FIXES_ROOT,
+    HarnessRun,
+    run_snippet,
+)
 from tools.findings_console.models import Check, CheckKind, CheckResult, Target, Verdict
 
 _VERDICT_TOKENS = {v.value: v for v in Verdict}
+
+
+def _glc_root_for(target: Target) -> tuple[str, Path]:
+    """ "before" imports the frozen pre-hardening glc package (no
+    hash-chaining, no policy-engine freeze, no cost-ledger validation)
+    so these snippets show the finding's original, unmitigated
+    behavior; every other target name imports the hardened one.
+
+    Returns a description for the evidence text — NOT the recorded
+    target_name, which must stay exactly target.name ("before"/"after")
+    so the dashboard's before/after lookup (store.latest_for_target)
+    can find this run again."""
+    if target.name == "before":
+        return "without_fixes/glc (pre-hardening baseline)", WITHOUT_FIXES_ROOT
+    return "with_fixes/glc (hardened)", WITH_FIXES_ROOT
 
 
 def _parse(run: HarnessRun) -> tuple[Verdict, str]:
@@ -44,12 +66,13 @@ def _parse(run: HarnessRun) -> tuple[Verdict, str]:
 
 
 def _run(snippet: str, target: Target, check_id: str) -> CheckResult:
-    run = run_snippet(snippet)
+    glc_description, glc_root = _glc_root_for(target)
+    run = run_snippet(snippet, glc_root=glc_root)
     verdict, summary = _parse(run)
-    evidence = f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}"
+    evidence = f"imported: {glc_description}\n--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}"
     return CheckResult(
         check_id=check_id,
-        target_name="local checkout (in-process checks always run locally)",
+        target_name=target.name,
         kind=CheckKind.INPROCESS,
         verdict=verdict,
         summary=summary,

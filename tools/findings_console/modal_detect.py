@@ -1,11 +1,17 @@
-"""Auto-detect the deployed Modal gateway's URL and install token.
+"""Auto-detect a deployed Modal gateway's URL and install token.
 
 The console used to require pasting a `*.modal.run` URL and an install
 token into the target form by hand. Both are actually derivable: the
 app name, the ASGI function name, the Volume name, and the config path
-are all literal strings in `modal_app.py`, and the Modal SDK can look
+are all literal strings in a modal_app.py, and the Modal SDK can look
 up a deployed Function's web URL and read a file out of a Volume
 directly - no `modal` CLI subprocess, no copy-pasting.
+
+Every function here takes an explicit `modal_app_path` because this
+console now tracks *two* deployments side by side - the "before"
+baseline (without_fixes/modal_app.py) and the "after" hardened gateway
+(with_fixes/modal_app.py) - and each has to be resolved independently,
+never assumed to be "the" modal_app.py.
 
 This only ever *reads* already-deployed state (a Function's metadata,
 a file from a Volume) - it never deploys, modifies, or creates
@@ -18,22 +24,23 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-MODAL_APP_FILE = REPO_ROOT / "modal_app.py"
+WITH_FIXES_MODAL_APP = REPO_ROOT / "with_fixes" / "modal_app.py"
+WITHOUT_FIXES_MODAL_APP = REPO_ROOT / "without_fixes" / "modal_app.py"
 
 
-def _read_modal_app_source() -> str | None:
+def _read_modal_app_source(modal_app_path: Path) -> str | None:
     try:
-        return MODAL_APP_FILE.read_text(encoding="utf-8")
+        return modal_app_path.read_text(encoding="utf-8")
     except OSError:
         return None
 
 
-def detect_app_and_function() -> tuple[str, str] | None:
-    """Parse modal_app.py for the App name and the name of the function
+def detect_app_and_function(modal_app_path: Path = WITH_FIXES_MODAL_APP) -> tuple[str, str] | None:
+    """Parse a modal_app.py for the App name and the name of the function
     serving the ASGI app (the one decorated with @modal.asgi_app()).
-    Returns None if either can't be found - the file may have moved or
-    been restructured since this was written."""
-    src = _read_modal_app_source()
+    Returns None if either can't be found - the file may not exist yet
+    (not deployed) or have been restructured since this was written."""
+    src = _read_modal_app_source(modal_app_path)
     if src is None:
         return None
     app_match = re.search(r"""modal\.App\(\s*["']([^"']+)["']""", src)
@@ -43,12 +50,12 @@ def detect_app_and_function() -> tuple[str, str] | None:
     return app_match.group(1), fn_match.group(1)
 
 
-def detect_volume_and_token_path() -> tuple[str, str] | None:
-    """Parse modal_app.py for the Volume name and derive the install
+def detect_volume_and_token_path(modal_app_path: Path = WITH_FIXES_MODAL_APP) -> tuple[str, str] | None:
+    """Parse a modal_app.py for the Volume name and derive the install
     token's path relative to that Volume's root, from whatever mount
     point and GLC_CONFIG_DIR are actually configured - not hardcoded,
     since either could change if the file is edited."""
-    src = _read_modal_app_source()
+    src = _read_modal_app_source(modal_app_path)
     if src is None:
         return None
     vol_match = re.search(r"""modal\.Volume\.from_name\(\s*["']([^"']+)["']""", src)
@@ -106,28 +113,35 @@ async def fetch_install_token(volume_name: str, token_path: str) -> tuple[str | 
     return token, ""
 
 
-async def autodetect_target() -> tuple[str | None, str | None, str]:
-    """Best-effort end-to-end autodetect: (base_url, install_token, note).
-    Either value can be None if that piece couldn't be determined; note
-    explains what happened, for display in the dashboard's status panel."""
-    app_and_fn = detect_app_and_function()
+async def autodetect_target(
+    modal_app_path: Path = WITH_FIXES_MODAL_APP,
+) -> tuple[str | None, str | None, str]:
+    """Best-effort end-to-end autodetect against a specific modal_app.py:
+    (base_url, install_token, note). Either value can be None if that
+    piece couldn't be determined; note explains what happened, for
+    display in the dashboard's status panel."""
+    app_and_fn = detect_app_and_function(modal_app_path)
     if app_and_fn is None:
-        return None, None, "couldn't find `modal.App(...)` and an @modal.asgi_app() function in modal_app.py"
+        return (
+            None,
+            None,
+            f"couldn't find `modal.App(...)` and an @modal.asgi_app() function in {modal_app_path}",
+        )
     app_name, function_name = app_and_fn
 
     url, url_reason = await fetch_deployed_url(app_name, function_name)
 
     token = None
     token_reason = ""
-    vol_and_path = detect_volume_and_token_path()
+    vol_and_path = detect_volume_and_token_path(modal_app_path)
     if vol_and_path is not None:
         volume_name, token_path = vol_and_path
         token, token_reason = await fetch_install_token(volume_name, token_path)
 
     if url and token:
-        return url, token, f"auto-detected from modal_app.py: {app_name}/{function_name}"
+        return url, token, f"auto-detected from {modal_app_path.name}: {app_name}/{function_name}"
     if url:
-        reason = token_reason or "no Volume/token path found in modal_app.py"
+        reason = token_reason or f"no Volume/token path found in {modal_app_path}"
         return (
             url,
             None,

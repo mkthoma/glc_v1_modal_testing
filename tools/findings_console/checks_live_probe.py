@@ -26,6 +26,16 @@ experiment: ~20-30s, a clean exception, not a hang the way an earlier
 immediately before and after proves — or would disprove — that killing
 this container's own process has no effect on the gateway's.
 
+For a "before" target (the pre-hardening baseline), none of this
+applies — Move B/C predates that snapshot entirely, so there's no
+per-adapter container to call a probe Function inside of at all. Those
+four checks report a structural VULNERABLE verdict from reading
+without_fixes/modal_app.py directly instead of attempting a live call.
+
+Every CheckResult's target_name is always exactly target.name ("before"
+or "after") — never a longer descriptive string — since the dashboard's
+before/after comparison looks results up by that exact name.
+
 Requires modal_app.py to be deployed with both probe Functions present.
 If they're not (not deployed yet, wrong app name detected), these report
 `error`, not `vulnerable` — nothing was actually observed, so nothing
@@ -34,16 +44,67 @@ should be claimed either way.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from tools.findings_console.modal_detect import detect_app_and_function
+from tools.findings_console.modal_detect import (
+    WITH_FIXES_MODAL_APP,
+    WITHOUT_FIXES_MODAL_APP,
+    detect_app_and_function,
+)
 from tools.findings_console.models import Check, CheckKind, CheckResult, Target, Verdict
 
 PROBE_FUNCTION_NAME = "glc-adapter-shape-probe"
 SELF_KILL_PROBE_NAME = "glc-adapter-shape-self-kill-probe"
-_TARGET_NAME = "live adapter-shaped Modal container"
+
+
+def _modal_app_path_for(target: Target) -> Path:
+    return WITHOUT_FIXES_MODAL_APP if target.name == "before" else WITH_FIXES_MODAL_APP
+
+
+def _baseline_vulnerable_result(check_id: str, target: Target, explanation: str) -> CheckResult:
+    """The "before" baseline predates Move B/C entirely — there is no
+    per-adapter container to call a probe Function inside of, because
+    that separation is exactly what these findings say doesn't exist
+    yet. Confirmed by reading without_fixes/modal_app.py directly
+    (structural fact, not a live network call) rather than assumed."""
+    try:
+        src = WITHOUT_FIXES_MODAL_APP.read_text(encoding="utf-8")
+    except OSError as e:
+        return CheckResult(
+            check_id,
+            target.name,
+            CheckKind.LIVE_PROBE,
+            Verdict.ERROR,
+            f"couldn't read the baseline modal_app.py: {e}",
+            str(e),
+        )
+    function_count = len(re.findall(r"@app\.function\(", src))
+    has_separation = bool(re.search(r"ADAPTER_SECRETS|make_adapter_functions", src))
+    if has_separation:
+        return CheckResult(
+            check_id,
+            target.name,
+            CheckKind.LIVE_PROBE,
+            Verdict.ERROR,
+            "without_fixes/modal_app.py unexpectedly shows adapter container separation — "
+            "the baseline snapshot may have been replaced with the hardened version by mistake",
+            src,
+        )
+    return CheckResult(
+        check_id,
+        target.name,
+        CheckKind.LIVE_PROBE,
+        Verdict.VULNERABLE,
+        f"{explanation} — confirmed: without_fixes/modal_app.py defines {function_count} Modal "
+        f"Function(s) total, with no per-adapter separation at all, so every route and every "
+        f"adapter share this one process's environment and mounts",
+        src,
+    )
+
 
 # Illustrative only — shown in the "Attack command" box to demonstrate the
 # underlying code-level fact (any code sharing a process can do this); the
@@ -78,10 +139,11 @@ os.kill(os.getpid(), signal.SIGTERM)
 """
 
 
-def _call_probe() -> tuple[dict[str, Any] | None, str]:
-    app_and_fn = detect_app_and_function()
+def _call_probe(target: Target) -> tuple[dict[str, Any] | None, str]:
+    modal_app_path = _modal_app_path_for(target)
+    app_and_fn = detect_app_and_function(modal_app_path)
     if app_and_fn is None:
-        return None, "couldn't find modal.App(...) in modal_app.py to know which app to call"
+        return None, f"couldn't find modal.App(...) in {modal_app_path} to know which app to call"
     app_name, _function_name = app_and_fn
     try:
         import modal
@@ -95,10 +157,10 @@ def _call_probe() -> tuple[dict[str, Any] | None, str]:
     return result, ""
 
 
-def _probe_error(check_id: str, reason: str) -> CheckResult:
+def _probe_error(check_id: str, target: Target, reason: str) -> CheckResult:
     return CheckResult(
         check_id,
-        _TARGET_NAME,
+        target.name,
         CheckKind.LIVE_PROBE,
         Verdict.ERROR,
         f"couldn't call the live probe ({reason}) — deploy modal_app.py "
@@ -107,15 +169,21 @@ def _probe_error(check_id: str, reason: str) -> CheckResult:
     )
 
 
-def _check_l1(_: Target) -> CheckResult:
-    result, reason = _call_probe()
+def _check_l1(target: Target) -> CheckResult:
+    if target.name == "before":
+        return _baseline_vulnerable_result(
+            "L1",
+            target,
+            "GEMINI_API_KEY is an ordinary env var, visible to any code sharing this one process",
+        )
+    result, reason = _call_probe(target)
     if result is None:
-        return _probe_error("L1", reason)
+        return _probe_error("L1", target, reason)
     evidence = repr(result)
     if result.get("gemini_key_present"):
         return CheckResult(
             "L1",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.VULNERABLE,
             "GEMINI_API_KEY IS present inside a real, live adapter-shaped container — Secret scoping regressed",
@@ -123,7 +191,7 @@ def _check_l1(_: Target) -> CheckResult:
         )
     return CheckResult(
         "L1",
-        _TARGET_NAME,
+        target.name,
         CheckKind.LIVE_PROBE,
         Verdict.CLOSED,
         "GEMINI_API_KEY is absent from a real, live adapter-shaped Modal container — confirmed, not assumed",
@@ -131,15 +199,21 @@ def _check_l1(_: Target) -> CheckResult:
     )
 
 
-def _check_l3(_: Target) -> CheckResult:
-    result, reason = _call_probe()
+def _check_l3(target: Target) -> CheckResult:
+    if target.name == "before":
+        return _baseline_vulnerable_result(
+            "L3",
+            target,
+            "force_pair_owner() is an ordinary importable method, reachable from this one shared process",
+        )
+    result, reason = _call_probe(target)
     if result is None:
-        return _probe_error("L3", reason)
+        return _probe_error("L3", target, reason)
     evidence = repr(result)
     if result.get("data_mount_exists"):
         return CheckResult(
             "L3",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.VULNERABLE,
             "the real /data Volume IS mounted inside a live adapter-shaped container — force_pair_owner() "
@@ -148,7 +222,7 @@ def _check_l3(_: Target) -> CheckResult:
         )
     return CheckResult(
         "L3",
-        _TARGET_NAME,
+        target.name,
         CheckKind.LIVE_PROBE,
         Verdict.CLOSED,
         "force_pair_owner() still runs inside a live adapter-shaped container (Python can't block the call), "
@@ -157,15 +231,21 @@ def _check_l3(_: Target) -> CheckResult:
     )
 
 
-def _check_l4(_: Target) -> CheckResult:
-    result, reason = _call_probe()
+def _check_l4(target: Target) -> CheckResult:
+    if target.name == "before":
+        return _baseline_vulnerable_result(
+            "L4",
+            target,
+            "get_or_create_install_token()/install_token_path() are readable from this one shared process",
+        )
+    result, reason = _call_probe(target)
     if result is None:
-        return _probe_error("L4", reason)
+        return _probe_error("L4", target, reason)
     evidence = repr(result)
     if result.get("data_mount_exists"):
         return CheckResult(
             "L4",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.VULNERABLE,
             "the real /data Volume IS mounted inside a live adapter-shaped container — the real install "
@@ -174,7 +254,7 @@ def _check_l4(_: Target) -> CheckResult:
         )
     return CheckResult(
         "L4",
-        _TARGET_NAME,
+        target.name,
         CheckKind.LIVE_PROBE,
         Verdict.CLOSED,
         "get_or_create_install_token() still runs inside a live adapter-shaped container, but with no "
@@ -195,11 +275,20 @@ def _healthz(target: Target, timeout: float = 10) -> tuple[bool, str]:
 
 
 def _check_l8(target: Target) -> CheckResult:
+    if target.name == "before":
+        return _baseline_vulnerable_result(
+            "L8",
+            target,
+            "os.kill(os.getpid(), SIGTERM) is reachable from this one shared process with no "
+            "loopback/token check at all (not live-tested against the baseline itself — the same "
+            "self-kill risk documented for the hardened probe applies here too, and the structural "
+            "fact alone is conclusive: there is no separate container to isolate the blast radius to)",
+        )
     pre_ok, pre_detail = _healthz(target)
     if not pre_ok:
         return CheckResult(
             "L8",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.ERROR,
             f"aborted before testing: the real gateway's /healthz wasn't healthy to begin with "
@@ -207,9 +296,12 @@ def _check_l8(target: Target) -> CheckResult:
             pre_detail,
         )
 
-    app_and_fn = detect_app_and_function()
+    modal_app_path = _modal_app_path_for(target)
+    app_and_fn = detect_app_and_function(modal_app_path)
     if app_and_fn is None:
-        return _probe_error("L8", "couldn't find modal.App(...) in modal_app.py to know which app to call")
+        return _probe_error(
+            "L8", target, f"couldn't find modal.App(...) in {modal_app_path} to know which app to call"
+        )
     app_name, _function_name = app_and_fn
 
     try:
@@ -229,7 +321,7 @@ def _check_l8(target: Target) -> CheckResult:
     if not self_killed:
         return CheckResult(
             "L8",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.ERROR,
             "the self-kill probe returned normally instead of terminating — inconclusive, not a claim either way",
@@ -238,7 +330,7 @@ def _check_l8(target: Target) -> CheckResult:
     if not post_ok:
         return CheckResult(
             "L8",
-            _TARGET_NAME,
+            target.name,
             CheckKind.LIVE_PROBE,
             Verdict.VULNERABLE,
             f"the real gateway's /healthz stopped responding after this container's self-kill "
@@ -247,7 +339,7 @@ def _check_l8(target: Target) -> CheckResult:
         )
     return CheckResult(
         "L8",
-        _TARGET_NAME,
+        target.name,
         CheckKind.LIVE_PROBE,
         Verdict.CLOSED,
         "os.kill(os.getpid(), SIGTERM) still terminates this container's own process (Python can't block "
