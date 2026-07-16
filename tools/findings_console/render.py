@@ -129,8 +129,6 @@ _STYLE = """
   .meta { color: var(--text-faint); font-size: .72rem; }
   abbr.hint { border-bottom: 1px dotted var(--text-faint); text-decoration: none; cursor: help; color: inherit; }
 
-  .pin-badge { display: inline-block; padding: .12rem .5rem; border-radius: 999px; font-size: .66rem;
-               font-weight: 700; background: var(--accent-bg); color: #93c5fd; letter-spacing: .03em; }
   .commit { color: var(--accent); font-size: .78rem; font-family: inherit; }
 
   /* Definition-list detail block on the check page */
@@ -422,9 +420,7 @@ def _fixed_commit_html(run: dict) -> str:
     return f'<div class="commit">Fixed in commit: {e(commit)}</div>'
 
 
-def _compare_card(
-    position: str, run: dict | None, check_id: str = "", target_name: str = "", pinned: bool = False
-) -> str:
+def _compare_card(position: str, run: dict | None) -> str:
     """position is "before" or "after" — drives the color-coded framing
     (rose for before, green for after) so the two sides read apart at a
     glance, independent of whatever verdict badge sits inside."""
@@ -435,49 +431,18 @@ def _compare_card(
         </div>"""
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(run["ts"]))
     badge = _badge(Verdict(run["verdict"]))
-    pin_html = ""
-    if pinned:
-        pin_html = f"""<span class="pin-badge">PINNED</span>
-        <form method="post" action="/api/unpin/{e(check_id)}" style="display:inline;margin-left:.4rem">
-          <input type="hidden" name="target_name" value="{e(target_name)}">
-          <button type="submit" class="small">Unpin</button>
-        </form>"""
     return f"""<div class="compare-card {position}">
       <span class="compare-eyebrow {position}">{e(position)}</span>
       <div class="compare-meta">{e(when)} - target: {e(run["target_name"])}</div>
-      <div style="margin-bottom:var(--sp-2)">{badge} {pin_html}</div>
+      <div style="margin-bottom:var(--sp-2)">{badge}</div>
       {_fixed_commit_html(run)}
       <div class="compare-summary">{e(run["summary"])}</div>
       <pre>{e(run["evidence"])}</pre>
     </div>"""
 
 
-def _before_after_block(
-    check_id: str, target_name: str, before: dict | None, after: dict | None, pin_run_id: int | None
-) -> str:
-    same_run = before is not None and after is not None and before["id"] == after["id"]
-    note = " (only one run recorded)" if same_run else ""
-    before_note = "" if pin_run_id is not None else " - earliest recorded, pin a row below to override"
-    return f"""
-    <div class="compare-target">target: {e(target_name)}{e(note)}</div>
-    <div class="grid2">
-      {_compare_card("before", before, check_id, target_name, pinned=pin_run_id is not None)}
-      {_compare_card("after", after)}
-    </div>
-    {f'<div class="meta" style="margin-top:var(--sp-1)">Before{e(before_note)}</div>' if before_note else ""}"""
-
-
-def _history_row(r: dict, check_id: str, pinned_by_target: dict[str, int]) -> str:
+def _history_row(r: dict) -> str:
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"]))
-    target_name = r["target_name"]
-    if pinned_by_target.get(target_name) == r["id"]:
-        action = '<span class="pin-badge">PINNED</span>'
-    else:
-        action = f"""<form method="post" action="/api/pin/{e(check_id)}">
-          <input type="hidden" name="target_name" value="{e(target_name)}">
-          <input type="hidden" name="run_id" value="{r["id"]}">
-          <button type="submit" class="small">Pin as before</button>
-        </form>"""
     commit = r.get("git_commit")
     commit_cell = (
         f'<span class="commit">{e(commit)}</span>'
@@ -485,7 +450,7 @@ def _history_row(r: dict, check_id: str, pinned_by_target: dict[str, int]) -> st
         else '<span class="meta">-</span>'
     )
     return f"""<tr><td class="meta">{e(when)}</td><td>{_badge(Verdict(r["verdict"]))}</td>
-        <td>{e(target_name)}</td><td>{e(r["summary"])}</td><td>{commit_cell}</td><td>{action}</td></tr>"""
+        <td>{e(r["target_name"])}</td><td>{e(r["summary"])}</td><td>{commit_cell}</td></tr>"""
 
 
 def _resolve_command(command: str, target: Target) -> str:
@@ -519,9 +484,10 @@ def _baseline_vs_hardened_block(before_run: dict | None, after_run: dict | None)
     """The dashboard's actual point: this check's real, live result
     against the deployed pre-hardening baseline next to its real, live
     result against the deployed hardened gateway — two separate Modal
-    apps, not a guess about "what used to be true." Distinct from the
-    generic per-target history below, which tracks any target's own
-    timeline (useful across redeploys of the *same* app)."""
+    apps, not a guess about "what used to be true." Always the latest
+    run for each of the two fixed targets — the plain history table
+    below has every run ever recorded, if you need more than the most
+    recent one."""
     return f"""
     <div class="compare-target">before (baseline) vs. after (hardened) — each side is that target's most recent run</div>
     <div class="grid2">
@@ -533,26 +499,14 @@ def _baseline_vs_hardened_block(before_run: dict | None, after_run: dict | None)
 def check_detail(
     check: Check,
     history: list[dict],
-    per_target: list[tuple[str, dict | None, dict | None, int | None]],
     target: Target,
     before_run: dict | None = None,
     after_run: dict | None = None,
 ) -> str:
-    if per_target:
-        before_after = "".join(
-            _before_after_block(check.id, name, before, after, pin_run_id)
-            for name, before, after, pin_run_id in per_target
-        )
-    else:
-        before_after = (
-            '<div class="panel notice">no runs recorded yet. Run this check against a target first.</div>'
-        )
-
-    pinned_by_target = {name: pin_run_id for name, _b, _a, pin_run_id in per_target if pin_run_id is not None}
-    hist_rows = "".join(_history_row(r, check.id, pinned_by_target) for r in history)
+    hist_rows = "".join(_history_row(r) for r in history)
     hist_table = f"""<div class="table-wrap"><table>
-      <tr><th>when</th><th>verdict</th><th>target</th><th>summary</th><th>commit</th><th></th></tr>
-      {hist_rows or '<tr><td colspan="6">no runs yet</td></tr>'}</table></div>"""
+      <tr><th>when</th><th>verdict</th><th>target</th><th>summary</th><th>commit</th></tr>
+      {hist_rows or '<tr><td colspan="5">no runs yet</td></tr>'}</table></div>"""
 
     inv_desc = describe_invariant(check.invariant)
     ar_desc = ATTACKER_ROLES.get(check.attacker_role)
@@ -587,15 +541,14 @@ def check_detail(
         <button type="submit" class="primary">Run now (after / hardened)</button>
       </form>
       <form method="post" action="/api/clear/{e(check.id)}"
-            onsubmit="return confirm('Delete all history and any pinned baseline for {e(check.id)}, across every target? This cannot be undone.')">
+            onsubmit="return confirm('Delete all history for {e(check.id)}, across every target? This cannot be undone.')">
         <button type="submit" class="danger">Clear history for this check</button>
       </form>
     </div>
     <h2 class="section-heading">Before vs. after</h2>
     <div class="compare-wrap">{_baseline_vs_hardened_block(before_run, after_run)}</div>
-    <h2 class="section-heading">Full history by target ({len(history)} run(s) total) - pin any row as its target's own baseline</h2>
-    <p class="meta" style="margin:0 0 var(--sp-3)">Tracks each target's own timeline across re-runs/redeploys — separate from the before/after comparison above.</p>
-    <div class="compare-wrap">{before_after}</div>
+    <h2 class="section-heading">Full run history ({len(history)} run(s) total)</h2>
+    <p class="meta" style="margin:0 0 var(--sp-3)">Every run ever recorded for this check, most recent first — the row that fed the "before"/"after" cards above is always the top row for that target.</p>
     {hist_table}
     """
     return _page(f"{check.id} — {check.title}", body)

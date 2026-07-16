@@ -62,19 +62,6 @@ def init_db() -> None:
         )
         _ensure_column(c, "runs", "git_commit", "TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_check_ts ON runs(check_id, ts DESC)")
-        # Which run counts as "before" for a given (check, target). This is a
-        # pointer, not evidence — unlike `runs`, it's fine for this to be an
-        # ordinary mutable row (INSERT OR REPLACE), same as glc's own
-        # pairings table (glc/security/pairing.py) uses for "current state."
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS pins (
-                check_id TEXT NOT NULL,
-                target_name TEXT NOT NULL,
-                run_id INTEGER NOT NULL,
-                pinned_at REAL NOT NULL,
-                PRIMARY KEY (check_id, target_name)
-            )"""
-        )
 
 
 def record(result: CheckResult) -> int:
@@ -135,36 +122,6 @@ def latest(check_id: str) -> dict | None:
         return _row_to_dict(row) if row else None
 
 
-def targets_for_check(check_id: str) -> list[str]:
-    """Distinct target_names this check has ever run against, oldest-first —
-    so e.g. a 'local' target you used while iterating shows before a
-    'modal-prod' target you set up later."""
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT target_name FROM runs WHERE check_id=? GROUP BY target_name ORDER BY MIN(ts) ASC",
-            (check_id,),
-        ).fetchall()
-        return [r["target_name"] for r in rows]
-
-
-def history_for_target(check_id: str, target_name: str, limit: int = 50) -> list[dict]:
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT * FROM runs WHERE check_id=? AND target_name=? ORDER BY ts DESC LIMIT ?",
-            (check_id, target_name, limit),
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
-
-
-def earliest_for_target(check_id: str, target_name: str) -> dict | None:
-    with _conn() as c:
-        row = c.execute(
-            "SELECT * FROM runs WHERE check_id=? AND target_name=? ORDER BY ts ASC LIMIT 1",
-            (check_id, target_name),
-        ).fetchone()
-        return _row_to_dict(row) if row else None
-
-
 def latest_for_target(check_id: str, target_name: str) -> dict | None:
     with _conn() as c:
         row = c.execute(
@@ -174,65 +131,17 @@ def latest_for_target(check_id: str, target_name: str) -> dict | None:
         return _row_to_dict(row) if row else None
 
 
-def get_run(run_id: int) -> dict | None:
-    with _conn() as c:
-        row = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        return _row_to_dict(row) if row else None
-
-
-def set_pin(check_id: str, target_name: str, run_id: int) -> None:
-    """Lock in `run_id` as the "before" run for this (check, target) —
-    used instead of guessing "earliest run" once you've had to retry a
-    check a few times and the real vulnerable baseline isn't the first
-    row anymore."""
-    with _conn() as c:
-        c.execute(
-            "INSERT OR REPLACE INTO pins (check_id, target_name, run_id, pinned_at) VALUES (?,?,?,?)",
-            (check_id, target_name, run_id, time.time()),
-        )
-
-
-def clear_pin(check_id: str, target_name: str) -> None:
-    with _conn() as c:
-        c.execute("DELETE FROM pins WHERE check_id=? AND target_name=?", (check_id, target_name))
-
-
-def get_pin(check_id: str, target_name: str) -> int | None:
-    with _conn() as c:
-        row = c.execute(
-            "SELECT run_id FROM pins WHERE check_id=? AND target_name=?", (check_id, target_name)
-        ).fetchone()
-        return int(row["run_id"]) if row else None
-
-
-def baseline_for_target(check_id: str, target_name: str) -> dict | None:
-    """The "before" run to show: the pinned run if you've pinned one,
-    otherwise the earliest recorded run for this target (the original
-    default, kept as a fallback so this is backward-compatible)."""
-    pinned_id = get_pin(check_id, target_name)
-    if pinned_id is not None:
-        run = get_run(pinned_id)
-        if run is not None:
-            return run
-        # the pinned run no longer exists (history was cleared since) — the
-        # pin is stale, drop it rather than silently returning nothing
-        clear_pin(check_id, target_name)
-    return earliest_for_target(check_id, target_name)
-
-
 def clear_all() -> None:
-    """Deletes every run and every pin, for every check and every
-    target. Irreversible — the UI confirms before calling this."""
+    """Deletes every run, for every check and every target. Irreversible —
+    the UI confirms before calling this."""
     with _conn() as c:
         c.execute("DELETE FROM runs")
-        c.execute("DELETE FROM pins")
 
 
 def clear_for_check(check_id: str) -> None:
-    """Deletes history and pins for one check, across all targets."""
+    """Deletes history for one check, across all targets."""
     with _conn() as c:
         c.execute("DELETE FROM runs WHERE check_id=?", (check_id,))
-        c.execute("DELETE FROM pins WHERE check_id=?", (check_id,))
 
 
 def latest_per_check() -> dict[str, dict]:

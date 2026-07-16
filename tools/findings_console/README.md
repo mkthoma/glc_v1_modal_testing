@@ -72,9 +72,9 @@ By default, every startup already force-kills whatever's listening on `8811` for
    | `error` | the check itself failed to run (network error, timeout, unexpected response shape) — not a verdict on the finding |
 
    The dashboard's own **Reference → Verdict codes** legend spells this out in full — it's the single source of truth `models.py`'s `VERDICT_DESCRIPTIONS` and every check's actual verdict logic is written against, so it never drifts out of sync with what the checks actually do. In practice, every check's **before** column should read `vulnerable` (the baseline has none of the fixes) and **after** should read `closed` or `mitigated`, matching `FINDINGS.md` exactly — that agreement across two independently deployed apps *is* the proof the fixes work, not just documentation saying so.
-5. **Compare before vs. after, per check** — click into any check (`/check/<id>`) to see a **Before vs. after** block: the before target's most recent run next to the after target's most recent run, using the exact evidence each run actually produced. This is separate from the **Full history by target** section further down, which tracks each target's own timeline across re-runs/redeploys (useful for regression-testing a single deployment over time) — pin any row there as that target's own baseline the same way it always worked.
+5. **Compare before vs. after, per check** — click into any check (`/check/<id>`) to see a **Before vs. after** block: the before target's most recent run next to the after target's most recent run, using the exact evidence each run actually produced. A plain **Full run history** table further down lists every run ever recorded for that check, most recent first, across both targets.
 6. **Read the attack command and the fix** — every check's own page has an **Attack command** box (the literal `curl`/Python you'd run by hand to reproduce it, with the **after** target's URL and token already substituted in) and a **How this is fixed** box (which file changed and the actual mechanism, not just "see the commit").
-7. **Clear history** — **Clear all history** on the dashboard wipes every run and every pin, for every check and every target (confirmation required — this is irreversible). **Clear history for this check**, on a check's detail page, does the same but scoped to just that one check.
+7. **Clear history** — **Clear all history** on the dashboard wipes every run, for every check and every target (confirmation required — this is irreversible). **Clear history for this check**, on a check's detail page, does the same but scoped to just that one check.
 8. **Export** — `Export FINDINGS.md draft` (`GET /api/export.md`) dumps every finding, grouped exactly like the dashboard (see [The 22 checks](#the-22-checks) below), each one leading with the invariant and attacker-role sentence `ASSIGNMENT.md` asks for — spelled out in full, not left as a bare code — plus whatever's been run so far.
 9. **See which commit actually fixed something** — every run is stamped with the local checkout's current git commit (short SHA) at the moment it ran. Once a check's verdict reaches `closed` or `mitigated`, that run's panel shows `Fixed in commit: <sha>`.
 
@@ -130,7 +130,7 @@ Every run is logged to `.findings_console/console.sqlite` at the repo root (giti
 tools/findings_console/
   models.py            Check, CheckResult, Verdict, Target, and the INV/AR/kind description tables
   sections.py           groups checks into A/B/C/ten-leaks, matching Session 12 §6/§7
-  store.py               append-only SQLite log (record/history/earliest/latest, pins, per-target variants)
+  store.py               append-only SQLite log (record/history/earliest/latest, per-target latest)
   gitinfo.py              captures the local checkout's current commit for every run
   harness.py               spawns an isolated subprocess for in-process checks; glc_root picks with_fixes/ or without_fixes/
   modal_detect.py           parses a modal_app.py + calls the Modal SDK to auto-detect a target's URL/token

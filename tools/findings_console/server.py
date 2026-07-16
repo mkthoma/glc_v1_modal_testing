@@ -262,37 +262,9 @@ async def check_detail(check_id: str) -> HTMLResponse:
     if check is None:
         return HTMLResponse(f"unknown check id {check_id!r}", status_code=404)
     hist = store.history(check_id)
-    per_target = [
-        (
-            name,
-            store.baseline_for_target(check_id, name),
-            store.latest_for_target(check_id, name),
-            store.get_pin(check_id, name),
-        )
-        for name in store.targets_for_check(check_id)
-    ]
     before_run = store.latest_for_target(check_id, "before")
     after_run = store.latest_for_target(check_id, "after")
-    return HTMLResponse(render.check_detail(check, hist, per_target, _after_target(), before_run, after_run))
-
-
-@app.post("/api/pin/{check_id}")
-async def pin_run(
-    check_id: str,
-    target_name: str = Form(...),
-    run_id: int = Form(...),
-) -> RedirectResponse:
-    store.set_pin(check_id, target_name, run_id)
-    return RedirectResponse(url=f"/check/{check_id}", status_code=303)
-
-
-@app.post("/api/unpin/{check_id}")
-async def unpin_run(
-    check_id: str,
-    target_name: str = Form(...),
-) -> RedirectResponse:
-    store.clear_pin(check_id, target_name)
-    return RedirectResponse(url=f"/check/{check_id}", status_code=303)
+    return HTMLResponse(render.check_detail(check, hist, _after_target(), before_run, after_run))
 
 
 @app.post("/api/clear")
