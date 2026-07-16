@@ -34,7 +34,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["glc"]
+packages = ["with_fixes/glc"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -48,22 +48,35 @@ markers = [
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+# without_fixes/ is a frozen pre-hardening snapshot kept only to deploy as
+# the findings console's "before" baseline target — it's deliberately never
+# touched again, so it's excluded from lint/format rather than carrying
+# every finding's original vulnerability as a suppressed warning.
+exclude = ["without_fixes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+# glc/ moved into with_fixes/ (no longer a top-level dir relative to the
+# project root), so ruff's isort integration stopped auto-detecting it as
+# first-party and started reclassifying every already-correctly-ordered
+# `from glc.x import y` import block as "unsorted" against its new
+# (wrong) guess. Declaring it explicitly restores the original grouping.
+known-first-party = ["glc"]
 
 [tool.ruff.lint.per-file-ignores]
 # V9-ported modules — kept verbatim from llm_gatewayV9. These have
 # pre-existing minor smells (unused intermediate variables, B904 raise-from
 # style, B023 loop-bound closures in retry logic) that we accept as-is so
 # the V9 fixes are not re-introduced during a touch-up.
-"glc/providers.py" = ["B023", "B904", "F841"]
-"glc/routes/chat.py" = ["B023", "B904", "F841"]
-"glc/embedders.py" = ["B023", "B904", "F841"]
-"glc/routing.py" = ["B023", "B904", "F841"]
+"with_fixes/glc/providers.py" = ["B023", "B904", "F841"]
+"with_fixes/glc/routes/chat.py" = ["B023", "B904", "F841"]
+"with_fixes/glc/embedders.py" = ["B023", "B904", "F841"]
+"with_fixes/glc/routing.py" = ["B023", "B904", "F841"]
 # Stub adapters intentionally redefine narrow abstract types — quiet B027.
-"glc/channels/base.py" = ["B027"]
+"with_fixes/glc/channels/base.py" = ["B027"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -72,26 +85,26 @@ ignore_missing_imports = true
 warn_unused_ignores = false
 
 [tool.coverage.run]
-source = ["glc"]
+source = ["with_fixes/glc"]
 omit = [
     # V9-ported provider/embedder/cache code — requires live API keys
     # to exercise meaningfully. The V9 test suite covers these.
-    "glc/providers.py",
-    "glc/embedders.py",
-    "glc/cache.py",
-    "glc/llm_schemas.py",
-    "glc/pricing.py",
-    "glc/routing.py",
-    "glc/db.py",
-    "glc/routes/chat.py",
+    "with_fixes/glc/providers.py",
+    "with_fixes/glc/embedders.py",
+    "with_fixes/glc/cache.py",
+    "with_fixes/glc/llm_schemas.py",
+    "with_fixes/glc/pricing.py",
+    "with_fixes/glc/routing.py",
+    "with_fixes/glc/db.py",
+    "with_fixes/glc/routes/chat.py",
     # Channel adapter stubs raise NotImplementedError — the green path
     # is tested per-PR through adapter-pr.yml.
-    "glc/channels/catalogue/*",
+    "with_fixes/glc/channels/catalogue/*",
     # Voice provider stubs and helper wrappers — same exemption as
     # channel adapter stubs. Real-call code paths need keys and model
     # downloads; the catalogue test pattern uses mocks.
-    "glc/voice/stt/providers/*",
-    "glc/voice/tts/providers/*",
+    "with_fixes/glc/voice/stt/providers/*",
+    "with_fixes/glc/voice/tts/providers/*",
     # CLI is a thin argparse shim around glc.main:app.
-    "glc/cli.py",
+    "with_fixes/glc/cli.py",
 ]

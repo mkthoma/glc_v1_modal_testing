@@ -33,7 +33,7 @@ from glc.security.pairing import get_pairing_store
 
 ALL_CATALOGUE_ADAPTERS = [
     p.name
-    for p in (Path(__file__).parent.parent / "glc" / "channels" / "catalogue").iterdir()
+    for p in (Path(__file__).parent.parent / "with_fixes" / "glc" / "channels" / "catalogue").iterdir()
     if p.is_dir() and p.name != "__pycache__"
 ]
 

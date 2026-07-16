@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-MODAL_APP = Path(__file__).parent.parent / "modal_app.py"
+MODAL_APP = Path(__file__).parent.parent / "with_fixes" / "modal_app.py"
 
 
 def _source() -> str:
@@ -81,7 +81,7 @@ def test_adapter_functions_never_mount_the_volume():
 
 ALL_CATALOGUE_ADAPTERS = [
     p.name
-    for p in (Path(__file__).parent.parent / "glc" / "channels" / "catalogue").iterdir()
+    for p in (Path(__file__).parent.parent / "with_fixes" / "glc" / "channels" / "catalogue").iterdir()
     if p.is_dir() and p.name != "__pycache__"
 ]
 

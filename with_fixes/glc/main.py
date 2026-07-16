@@ -16,7 +16,20 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 ROOT = Path(__file__).parent
-load_dotenv(ROOT.parent / ".env")  # repo .env, if present
+
+
+def _find_repo_root() -> Path:
+    # Not just ROOT.parent: glc/ lives one level deeper than the repo root
+    # since the with_fixes/glc_v1_modal_testing restructuring, and hardcoding
+    # a fixed parent-count is exactly the kind of path assumption that broke
+    # silently the first time this package moved.
+    for p in ROOT.resolve().parents:
+        if (p / "pyproject.toml").exists():
+            return p
+    return ROOT.parent  # fallback: best guess if pyproject.toml isn't found
+
+
+load_dotenv(_find_repo_root() / ".env")  # repo .env, if present
 
 from glc import db  # noqa: E402
 from glc import embedders as E  # noqa: E402

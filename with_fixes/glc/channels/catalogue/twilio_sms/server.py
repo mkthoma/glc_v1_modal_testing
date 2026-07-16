@@ -36,7 +36,15 @@ from glc.security.pairing import get_pairing_store
 from .adapter import Adapter
 from .webhook import build_app, gateway_roundtrip
 
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")  # matches glc/main.py's convention
+
+def _find_repo_root() -> Path:
+    for p in Path(__file__).resolve().parents:
+        if (p / "pyproject.toml").exists():
+            return p
+    raise RuntimeError("pyproject.toml not found — run from within the repo")
+
+
+load_dotenv(_find_repo_root() / ".env")  # matches glc/main.py's convention
 
 # ─── ANSI colors ─────────────────────────────────────────────────────────────
 DIM = "\033[38;5;250m"

@@ -16,7 +16,7 @@ Required bot configuration in the Discord Developer Portal:
     - Bot Permissions: Send Messages, Read Messages/View Channels
 
 Run with:
-    uv run pytest glc/channels/catalogue/discord/tests/ -m requires_live_api -v
+    uv run pytest with_fixes/glc/channels/catalogue/discord/tests/ -m requires_live_api -v
 """
 
 from __future__ import annotations
@@ -31,7 +31,15 @@ from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.catalogue.discord.tests.run_discord_bridge import RealDiscordClient
 from glc.channels.envelope import ChannelReply
 
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+
+def _find_repo_root() -> Path:
+    for p in Path(__file__).resolve().parents:
+        if (p / "pyproject.toml").exists():
+            return p
+    raise RuntimeError("pyproject.toml not found — run from within the repo")
+
+
+load_dotenv(_find_repo_root() / ".env")
 
 BOT_TOKEN: str = os.environ.get("DISCORD_BOT_TOKEN", "")
 CHANNEL_ID: str = os.environ.get("DISCORD_TEST_CHANNEL_ID", "")

@@ -30,8 +30,10 @@ makes them work:
    the wrong number of parent hops (they assumed the slot-root location, one
    level shallower than `tests/`). `send_test_message.py` / `run_discord_bridge.py`
    looked in `glc/.env`; `test_live_discord.py` looked *above* the repo. All now
-   use `Path(__file__).resolve().parents[5] / ".env"`, which resolves to the
-   repository root regardless of the caller's working directory.
+   walk up from `Path(__file__)` looking for `pyproject.toml` instead of a
+   hardcoded `parents[N]` hop count — the same fixed-depth assumption broke
+   again, silently, the first time `glc/` moved a directory level (into
+   `with_fixes/`), which is exactly why this walks up now instead.
 
 3. **README run commands updated** — the slot `README.md` `python -m ...`
    invocations now point at `...discord.tests.run_discord_bridge` /

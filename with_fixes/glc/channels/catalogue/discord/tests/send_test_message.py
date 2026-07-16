@@ -14,8 +14,16 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.tests.run_discord_bridge import RealDiscordClient
 
+
+def _find_repo_root() -> Path:
+    for p in Path(__file__).resolve().parents:
+        if (p / "pyproject.toml").exists():
+            return p
+    raise RuntimeError("pyproject.toml not found — run from within the repo")
+
+
 # Load environment variables from .env at repository root
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+load_dotenv(_find_repo_root() / ".env")
 
 
 async def main():

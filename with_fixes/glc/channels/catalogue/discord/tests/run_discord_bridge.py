@@ -21,8 +21,16 @@ from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.envelope import ChannelReply
 from glc.config import get_or_create_install_token
 
+
+def _find_repo_root() -> Path:
+    for p in Path(__file__).resolve().parents:
+        if (p / "pyproject.toml").exists():
+            return p
+    raise RuntimeError("pyproject.toml not found — run from within the repo")
+
+
 # Load environment variables from .env at repository root
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+load_dotenv(_find_repo_root() / ".env")
 
 
 class RealDiscordClient:
