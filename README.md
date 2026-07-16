@@ -157,6 +157,81 @@ container shape as a real catalogue adapter, and reports what that live
 container can actually observe — a genuine measurement, not a local
 assumption.
 
+### Check detail pages — three worked examples
+
+Every finding ID in every table above is a link to its own page — the
+same page the **Fix commit(s)** lines further down in this README are
+describing in prose. Three examples below (`A1`, `C6`, `L4`), chosen to
+show the three different check kinds: a plain HTTP request, an HTTP
+request that needs the install token, and a live Modal probe.
+
+#### A1 — Public data plane, no auth
+
+![A1 check detail page, top half: invariant/attacker/kind, description, the real curl attack command, and the fix explanation](screenshots/A1_1.png)
+
+Above the fold: the invariant/attacker/kind detail list, a one-line
+description of the exploit, the **Attack command** box (the literal
+`curl -X POST .../v1/chat` with no `Authorization` header — copy-pasteable
+against the live deployment), and the **How this is fixed** box naming
+`require_data_plane_token` in `with_fixes/glc/security/auth.py` directly.
+The three buttons at the bottom re-run this one check against either
+target, or clear its history.
+
+![A1 check detail page, bottom half: before vs. after comparison and the full run history table](screenshots/A1_2.png)
+
+Below the fold: the real **before vs. after** comparison — `before`
+reached all the way to a live provider call (the request wasn't rejected,
+it just failed downstream with an invalid *mock* API key, which is itself
+the proof there's no auth gate in front of it), `after` returns `401`
+with a `missing bearer token` message before ever reaching provider
+dispatch, stamped `Fixed in commit: 22c8922`. The **Full run history**
+table underneath lists both runs chronologically — exactly two rows,
+one per target, no duplication.
+
+#### C6 — Pairing-code brute force
+
+![C6 check detail page, top half: invariant/attacker/kind, description, the attack command hammering /confirm with wrong codes, and the fix explanation](screenshots/C6_1.png)
+
+This check's `kind` is still an HTTP request, but one that needs
+`target.install_token` to even get started (issuing a real pairing
+request first) — the description box calls this out explicitly, since
+`C6` is the one finding in this set that's "AR4-adjacent" rather than
+reachable by an anonymous caller. The fix box names the exact mechanism:
+`CONFIRM_ATTEMPT_LIMIT=10` over a 5-minute window in
+`with_fixes/glc/security/pairing.py`.
+
+![C6 check detail page, bottom half: before vs. after comparison and the full run history table](screenshots/C6_2.png)
+
+`before`: 20 wrong-code attempts in a row, every single one a plain `404`
+— no attempt limiter at all. `after`: the same 20 attempts, but the
+sequence ends in a `429` once the limiter trips — `confirm attempts were
+eventually rate-limited/locked out`, `Fixed in commit: 22c8922`.
+
+#### L4 — Install token readable in-process
+
+![L4 check detail page, top half: invariant/attacker/kind, description noting this runs as a live Modal probe, the illustrative attack snippet, and the fix explanation](screenshots/L4_1.png)
+
+`L4`'s `kind` is **Live Modal probe** — the description box says so up
+front, and explains that the attack command shown is illustrative only
+(the actual verdict comes from calling the real deployed
+`glc-adapter-shape-probe` Function, not from running that snippet
+locally). The fix box explains the actual mechanism: every catalogue
+adapter's container (`adapter_image()`/`make_adapter_functions()` in
+`modal_app.py`) deliberately never mounts the Volume, so
+`get_or_create_install_token()` can still run in there, but only ever
+creates a throwaway token nobody else reads.
+
+![L4 check detail page, bottom half: before vs. after comparison and the full run history table](screenshots/L4_2.png)
+
+`before`: the baseline's `without_fixes/modal_app.py` defines exactly
+one Modal Function total, so *every* route and adapter shares its one
+process's environment — reading the install token from anywhere in that
+process reaches the real one. `after`: the same call still runs inside a
+live adapter-shaped container, but the evidence dict shows exactly why
+it doesn't matter — `data_mount_exists: False` (no `/data` mount to read
+the real token from at all), alongside `install_token_created: True`
+(the call itself isn't blocked, it just can't reach anything real).
+
 ## Attack surface: the 22 known findings, in detail
 
 Findings are grouped by *what the Modal migration did to each one* — this
