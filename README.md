@@ -161,10 +161,14 @@ assumption.
 
 Findings are grouped by *what the Modal migration did to each one* — this
 is the same grouping the local testing dashboard and its export use. Every
-finding below has its own commit and its own regression test; exact commit
-subjects are in [`FINDINGS.md`](FINDINGS.md) if you want to `git show` a
-specific diff — everything else (location, before, fix, how it was
-verified) is inline here so this README is self-contained.
+finding below has its own commit and its own regression test — the short
+hash after **Fix commit(s)** is `git show <hash>`-able directly in this
+repo's own history (`git log --oneline` to see them in order); most
+predate the later `with_fixes/` move (`7ffeb1b`), so `git show` on one of
+them shows the file at its original bare `glc/...` path, not
+`with_fixes/glc/...`. Everything else (location, before, fix, how it was
+verified) is inline here too, so this README is self-contained —
+`FINDINGS.md` remains the canonical version if the two ever drift.
 
 ### Section A — Introduced or elevated by the Modal migration
 
@@ -189,6 +193,7 @@ gateway was put on the public internet.
 
 **Before:** none of the six data-plane routes had an auth dependency — an anonymous internet caller could drive LLM spend and abuse the pipeline with zero credentials.
 **Fix:** `with_fixes/glc/security/auth.py`'s `require_data_plane_token` (constant-time `hmac.compare_digest` from the start), wired via `dependencies=[Depends(...)]` on all six routes.
+**Fix commit:** `dce704d` — harden: require bearer-token auth on the data plane (A1)
 **Verified:** `curl -X POST <url>/v1/chat -d '{"prompt":"hi"}'` now returns `401` instead of reaching provider dispatch — confirmed against the live Modal deployment, reproducible on demand via the console's A1 check.
 
 #### A2 — Unauthenticated info disclosure
@@ -200,6 +205,7 @@ gateway was put on the public internet.
 
 **Before:** all seven read endpoints were open with no auth — free reconnaissance of provider order, rate limits, and usage. `/docs`/`/openapi.json` were FastAPI defaults, never disabled.
 **Fix:** same `require_data_plane_token` dependency applied to all seven endpoints; `main.py` sets `docs_url`/`redoc_url`/`openapi_url` to `None` when `GLC_ENV=production` (set in the Modal image).
+**Fix commits:** `4428d7e` — harden: gate info-disclosure endpoints, disable docs in prod (A2); `8ad9b94` — harden: set GLC_ENV=production in the Modal image (A2 follow-up)
 **Verified:** live deployment — `/v1/status` returns `401` unauthenticated; `/docs` returns `404`.
 
 #### A3 — Single Function, no egress wall
@@ -212,6 +218,7 @@ gateway was put on the public internet.
 **Before:** one `@app.function` served the entire gateway plus every adapter — no `modal.Sandbox`, no egress control at all.
 **What widened the scope:** every adapter under `with_fixes/glc/channels/catalogue/` turned out to have a real, working implementation, not an unimplemented stub — so there was no reason to leave any of them sharing the core gateway's LLM Secret.
 **Fix:** every catalogue adapter now runs in its own Modal Function via `with_fixes/modal_app.py`'s `ADAPTER_SECRETS` mapping + `make_adapter_functions()`; the core gateway Function never imports adapter code in-process. Egress allowlisting via `modal.Sandbox` remains demonstrated only for telegram (Move D).
+**Fix commits:** `b2d8306` — harden: per-adapter container + scoped Secret, telegram (Move B/C); `615605b` — harden: migrate all 15 catalogue adapters to per-adapter Functions + Secrets (Move B/C gateway-wide); `9ac4177` — harden: egress allowlist via Modal Sandbox, telegram (Move D)
 **Verified:** `uv run modal run with_fixes/modal_app.py::verify_telegram_egress_allowlist` — a request to `api.telegram.org` succeeds, a request to `example.com` is blocked. The egress wall itself is **not** wired into the live per-request webhook dispatch path for any adapter, and the core gateway Function still needs open egress to reach LLM providers — that part stays "mitigated," not closed.
 
 #### A4 — One Secret for the whole Function
@@ -223,6 +230,7 @@ gateway was put on the public internet.
 
 **Before:** `llm_secret` mounted to the entire `fastapi_app` Function — every route and every adapter could read every provider key.
 **Fix:** `ADAPTER_SECRETS` maps every one of the 15 catalogue adapters to its own Secret (`glc-discord-secret`, `glc-gmail-secret`, `glc-imap-secret`, `glc-line-secret`, `glc-matrix-secret`, `glc-signal-secret`, `glc-slack-secret`, `glc-teams-secret`, `glc-telegram-secret`, `glc-twilio-sms-secret`, `glc-twilio-voice-secret`, `glc-webhook-secret`, `glc-whatsapp-secret`, or `None` for `local_mic`/`webui`, which need no external credential) — never `glc-llm-keys`.
+**Fix commits:** `b2d8306` — harden: per-adapter container + scoped Secret, telegram (Move B/C); `615605b` — harden: migrate all 15 catalogue adapters to per-adapter Functions + Secrets (Move B/C gateway-wide)
 **Verified:** two throwaway probe Functions sharing the exact live secret configuration, read directly on Modal: the core gateway's probe (`glc-llm-keys` only) showed all six LLM keys present and zero of the twelve adapter credentials; a `slack`-scoped probe (`glc-slack-secret` only) showed its own token present and zero LLM keys, zero other adapters' credentials.
 
 #### A5 — Non-reproducible image
@@ -234,6 +242,7 @@ gateway was put on the public internet.
 
 **Before:** `pip_install([...])` hand-duplicated from `pyproject.toml`, ignoring `uv.lock`; base image `debian_slim(python_version="3.11")` unpinned.
 **Fix:** `modal.Image.from_registry("python:3.11-slim@sha256:...")` (digest resolved via the Docker Hub registry API) piped into `.uv_sync(extra_options="--no-dev")`, which runs `uv sync --frozen` against this repo's own lock file.
+**Fix commit:** `5db94f4` — harden: reproducible image build from uv.lock, pin base digest (A5)
 **Verified:** redeployed to the live account — image builds clean from the pinned digest + `uv sync`, `/healthz` still returns `{"ok": true}`.
 
 #### A6 — Audit volume assumes one writer
@@ -245,9 +254,10 @@ gateway was put on the public internet.
 
 **Before:** `min_containers=0`, no `max_containers` limit; `audit.sqlite`/`gateway.sqlite` opened via bare `sqlite3.connect()` per call with no cross-container coordination.
 **Fix:** `max_containers=1` pinned on the core gateway Function.
+**Fix commit:** `6d9fd86` — harden: single-writer audit path (A6)
 **Verified:** redeployed live, `/healthz` still returns `{"ok": true}`.
 
-**A related bug found while re-verifying L3/L4/L8:** `with_fixes/glc/audit/store.py`, `with_fixes/glc/security/pairing.py`, and `with_fixes/glc/db.py` each hardcoded their own `~/.glc` default and only honored their own specific env var (`GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) — only `with_fixes/glc/config.py`'s `CONFIG_DIR` actually derived from `GLC_CONFIG_DIR`. Since `with_fixes/modal_app.py` only ever set `GLC_CONFIG_DIR`, `audit.sqlite`, `pairings.sqlite`, and `gateway.sqlite` were **never landing on the Volume at all** — they silently fell back to the container's own ephemeral filesystem and were wiped on every cold start. Confirmed directly: `modal volume ls glc-data glc` showed only `glc/install_token`, despite the deployment having handled real traffic for the entire session. Fixed by explicitly setting all four paths (`GLC_CONFIG_DIR`, `GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) to `/data/glc/...` on the core gateway's image. **Verified:** made a real request, confirmed `modal volume ls` now lists all four files; pulled `gateway.sqlite` locally, confirmed a `calls` row, redeployed, pulled it again, confirmed the same row survived the redeploy.
+**A related bug found while re-verifying L3/L4/L8** (fix commit `f854e0a` — fix: route all four stores to the Volume; close L3/L4/L8 for AR3): `with_fixes/glc/audit/store.py`, `with_fixes/glc/security/pairing.py`, and `with_fixes/glc/db.py` each hardcoded their own `~/.glc` default and only honored their own specific env var (`GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) — only `with_fixes/glc/config.py`'s `CONFIG_DIR` actually derived from `GLC_CONFIG_DIR`. Since `with_fixes/modal_app.py` only ever set `GLC_CONFIG_DIR`, `audit.sqlite`, `pairings.sqlite`, and `gateway.sqlite` were **never landing on the Volume at all** — they silently fell back to the container's own ephemeral filesystem and were wiped on every cold start. Confirmed directly: `modal volume ls glc-data glc` showed only `glc/install_token`, despite the deployment having handled real traffic for the entire session. Fixed by explicitly setting all four paths (`GLC_CONFIG_DIR`, `GLC_AUDIT_DB`, `GLC_PAIRING_DB`, `GLC_GATEWAY_DB`) to `/data/glc/...` on the core gateway's image. **Verified:** made a real request, confirmed `modal volume ls` now lists all four files; pulled `gateway.sqlite` locally, confirmed a `calls` row, redeployed, pulled it again, confirmed the same row survived the redeploy.
 
 ### Section B — The ten in-process code leaks
 
@@ -295,8 +305,9 @@ for the same attacker.
 - **Status:** fully closed for every catalogue adapter (the core gateway's own routes still share one process by necessity — they're the trusted core, not an adapter)
 
 Same fix and verification as A4 above — this is A4's code-level
-consequence, closed by the same container/Secret separation. The
-console's L1 check verifies this live, not from a local assumption: it
+consequence, closed by the same container/Secret separation.
+**Fix commits:** `615605b` — harden: migrate all 15 catalogue adapters to per-adapter Functions + Secrets (Move B/C gateway-wide); `bf846cd` — feat: live-verify L1/L3/L4 against the deployed adapter shape, not a local assumption
+The console's L1 check verifies this live, not from a local assumption: it
 calls `glc-adapter-shape-probe`, a Modal Function deployed with the exact
 same image shape as a real catalogue adapter (`adapter_image()`, no LLM
 Secret, no Volume mount), and reports whether `GEMINI_API_KEY` is
@@ -310,6 +321,7 @@ actually present in that container's environment.
 
 **Before:** `AuditStore` exposed only `append()`, but the underlying SQLite file is directly `DELETE`-able by any in-process code with a `sqlite3` handle.
 **Fix:** every row now carries `hash = sha256(prev_hash + canonical_json(row))`, chained off the previous row; `verify_chain()` walks the table and reports the first row where content or chain linkage no longer matches.
+**Fix commit:** `da02dfd` — harden: hash-chained audit log (L2/L3 defense-in-depth)
 **Verified:** a direct `DELETE FROM audit_log WHERE ...` (deleting a *mid-chain* row, with later rows still present) or an in-place `UPDATE` against a live-populated `audit.sqlite` is now caught by `verify_chain()` returning `(False, <first broken row id>)`.
 **Known limitation:** deleting the **tail** (the most recent row(s), or the entire table) is *not* detected — there's no later row left whose `prev_hash` would contradict the deletion. Inherent to hash-chaining without an external checkpoint; documented in the module docstring and covered by `tests/test_audit_hash_chain.py::test_known_limitation_deleting_the_tail_is_not_detected` so it stays an explicit, known gap.
 
@@ -321,6 +333,7 @@ actually present in that container's environment.
 
 `force_pair_owner()` writes directly to `pairings.sqlite`, a completely separate SQLite file from `audit.sqlite` — it's never routed through `glc.audit.append()`, so the L2 hash-chain fix gives it no protection.
 **What closes it for AR3:** every catalogue adapter now runs in its own Modal Function, and `adapter_image()`/`make_adapter_functions()` deliberately never set `GLC_PAIRING_DB` or mount the Volume — calling `force_pair_owner()` from inside any adapter's container cannot reach `/data/glc/pairings.sqlite`, the real store the gateway trusts. The call still runs (Python has no in-process ACL on an importable function), but it can only write to that container's own throwaway, ephemeral filesystem, which no other container ever reads.
+**Fix commits:** `615605b` — Move B/C container separation (gateway-wide); `f854e0a` — fix: route all four stores to the Volume; close L3/L4/L8 for AR3; `bf846cd` — feat: live-verify L1/L3/L4 against the deployed adapter shape
 **Verified live, permanently:** the console's L3 check calls `glc-adapter-shape-probe` directly. `os.path.isdir("/data")` from inside it returns `False` — there is no `/data` mount to write to at all. `force_pair_owner()` still runs and creates a record, but only in that container's own ephemeral filesystem, confirmed by the same probe call's `pairing_write_landed: True` alongside `data_mount_exists: False`.
 **Still open for AR4:** an attacker with code execution inside the gateway process itself has the real Volume mount and the real `GLC_PAIRING_DB`, so `force_pair_owner()` is still fully effective there — closing that needs a further split of the gateway's own trusted internals from its request-handling code, out of scope for this round.
 
@@ -332,6 +345,7 @@ actually present in that container's environment.
 
 **Before:** `0o600` file permission stops other OS users, not other in-process code.
 **What closes it for AR3:** same mechanism as L3 — `get_or_create_install_token()` called from inside any adapter's container resolves `CONFIG_DIR` to that container's own local `~/.glc` (no `GLC_CONFIG_DIR` set there), disconnected from `/data/glc/install_token`, the real token the gateway checks against.
+**Fix commits:** same as L3 — `615605b`, `f854e0a`, `bf846cd`
 **Verified live, permanently:** same `glc-adapter-shape-probe` Function as L3 — no `/data` mount exists in an adapter-shaped container at all; `install_token_created: True` alongside `data_mount_exists: False` confirms `get_or_create_install_token()` only ever creates a throwaway local token there.
 **Still open for AR4:** the gateway process itself has the real token file; closing this needs the same further internal split as L3/L5/L8.
 
@@ -348,6 +362,7 @@ actually present in that container's environment.
 - The module's own `__class__` is swapped to a `types.ModuleType` subclass whose `__setattr__` rejects external reassignment of `evaluate`, `get_engine`, and `reload_engine` once they're already defined. The exact line the finding shows — `import glc.policy.engine as e; e.evaluate = lambda *a, **k: PolicyVerdict(action="allow", reason="pwned")` — now raises `AttributeError`.
 
 **Why this is "mitigated," not "closed":** `__setattr__` interception doesn't stop a direct write to the module's own `__dict__` — `sys.modules["glc.policy.engine"].__dict__["evaluate"] = lambda *a, **k: ...` bypasses it entirely, is exactly one line, and is exactly as easy for the same AR4 attacker. This is the same class of residual gap as L2's hash-chain tail-deletion limitation: a real, verified improvement that raises the bar without closing the door.
+**Fix commits (in order, including a self-correction):** `e59695a` — harden: run the policy engine in its own process, close L5 for every tier (built the separated Function, but overclaimed "closed" while `engine.py` itself stayed untouched); `40f4270` — docs: correct overclaimed L5 "fully closed" status; `05e097a` — harden: block policy-engine monkey-patch via `__slots__` + frozen module (L5) (the actual direct fix to `engine.py`, current state)
 **Verified:** `tests/test_policy_remote.py::test_direct_monkeypatch_of_module_function_is_rejected` and `::test_direct_monkeypatch_of_instance_method_is_rejected` confirm both blocks raise; `::test_dict_write_bypass_still_works_documented_residual_gap` confirms the residual gap is real, not accidentally also closed. The console's L5 check runs the literal exploit, catches the now-raised `AttributeError`, then demonstrates the `__dict__`-write bypass, and reports `mitigated` with the caveat spelled out.
 **What's real but unused:** a separated `glc-policy-engine` Modal Function (no Secret, no Volume mount, rules from the packaged `policy.yaml`) is deployed and immune to *both* the blocked and the still-working local tamper technique, since it never references the local module. `GLC_POLICY_ENGINE_REMOTE=1` is set on the core gateway's env and `with_fixes/glc/policy/remote.py`'s `evaluate_remote()` is ready to use it — but nothing in the codebase calls it yet (the agent runtime is still a stub), so it remains the only mechanism that would fully close this for AR4 once something actually calls it.
 
@@ -356,6 +371,7 @@ actually present in that container's environment.
 - **Location:** `with_fixes/modal_app.py` (same root cause as A3)
 - **Invariant broken:** INV-3
 - **Status:** mitigated for telegram — see A3/Move D above
+- **Fix commit:** `9ac4177` — harden: egress allowlist via Modal Sandbox, telegram (Move D)
 
 #### L7 — Subprocess / PATH injection
 
@@ -366,6 +382,7 @@ actually present in that container's environment.
 
 **Before:** `shutil.which("whisper-cli")` resolved the binary via `PATH` — exploitable if an earlier-loaded, less-trusted directory in `PATH` contained a file named `whisper-cli`.
 **Fix:** `WHISPER_CLI_PATH` now resolves from `GLC_WHISPER_CLI_PATH` (default `/usr/local/bin/whisper-cli`), an absolute path checked with `.is_file()` before use — no `PATH` search at all.
+**Fix commit:** `f53cf44` — harden: whisper_cpp binary via configured path, not PATH (L7)
 **Verified:** pointing `GLC_WHISPER_CLI_PATH` at a nonexistent path raises a clear `RuntimeError` before any subprocess is spawned; the module no longer imports `shutil`.
 
 #### L8 — In-process kill
@@ -376,6 +393,7 @@ actually present in that container's environment.
 
 **Before:** any in-process code could call `os.kill(os.getpid(), SIGTERM)` directly, bypassing the loopback-only kill endpoint entirely.
 **What closes it for AR3:** every catalogue adapter now runs as its own Modal Function — a genuinely separate container with its own private PID namespace. `os.kill(os.getpid(), SIGTERM)` called from inside an adapter's code can only ever terminate that adapter's own container's own process — there is no `os.getpid()` value it could resolve to that reaches the actual `fastapi_app` Function's container, since they're different processes in different PID namespaces by construction.
+**Fix commits:** `615605b` — Move B/C container separation (gateway-wide); `f854e0a` — fix: route all four stores to the Volume; close L3/L4/L8 for AR3; `1c08a92` — feat: live-verify L8, clarify C2/L9's expected lockout collision with C6
 **Verified live, permanently:** `with_fixes/modal_app.py` deploys `glc-adapter-shape-self-kill-probe` — a second Function, kept separate from `glc-adapter-shape-probe` so a self-kill test never risks the read-only checks — and the console's L8 check calls it directly: confirms the real gateway's `/healthz` is healthy, calls the self-kill probe (expects an exception — confirmed: `InternalFailure: Server has lost track of input`), then confirms `/healthz` immediately after. Takes ~25-30s, not instant, since it's a real container teardown.
 **Still open for AR4:** an attacker with code execution inside the gateway process's own container can still call this and terminate it directly — same process, no boundary to cross.
 
@@ -392,6 +410,7 @@ Literal same bug as C2 — see Section C below.
 
 **Before:** `input_tokens`/`output_tokens` were unchecked ints with no range validation and no caller-identity binding.
 **Fix:** `log_call()` now rejects negative values and values above a 2,000,000-per-call ceiling (`MAX_TOKENS_PER_CALL`) with `ValueError`, before the `INSERT` runs.
+**Fix commit:** `3ea39be` — harden: validate cost-ledger writes (L10)
 **Verified:** `db.log_call(input_tokens=-1, ...)` and `db.log_call(input_tokens=10**9, ...)` both now raise instead of landing a poisoned row.
 
 ### Section C — Inherited endpoint/logic issues, now internet-reachable
@@ -417,6 +436,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** fetched any `http(s)` URL handed to it, following redirects, with no host restriction — the single most "textbook OWASP" finding in the assignment.
 **Fix:** `_is_blocked_image_host()` resolves the hostname and rejects loopback/private/link-local ranges, failing closed on an unresolvable host. `follow_redirects=True` replaced with a manual redirect walk (max 5 hops) that re-validates the host on every hop, not just the initial URL.
+**Fix commit:** `b85e375` — harden: SSRF allowlist on the chat image-url resolver (C1)
 **Verified:** `image_url: "http://169.254.169.254/..."` now returns `400 blocked: private/loopback address not allowed` instead of fetching the cloud metadata endpoint; a crafted redirect from an allowed host to a private IP is blocked before the second fetch.
 
 #### C2 / L9 — Cross-channel envelope spoofing
@@ -428,6 +448,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** the WS handler trusted whatever `channel` field a caller put in the envelope body over the channel identity implied by the route it connected to.
 **Fix:** immediately after envelope validation, reject and close (`WS_1008_POLICY_VIOLATION`) any message where `env.channel != name`, checked on every message inside the loop, not just at connect time; the attempt is audit-logged as `channel_spoof_attempt`.
+**Fix commits:** `519db0b` — harden: reject cross-channel envelope spoofing over WS (C2/L9); `e1c21ce` — fix: C2/L9 skips re-pairing once already paired, immune to C6's lockout (console-side testability fix, not a security change)
 **Verified:** connect to `/v1/channels/webui`, send an envelope with `channel="whatsapp"` — connection now closes with code 1008 instead of being processed as whatsapp traffic; the check also fires on message #2 of a connection that sent a legitimate envelope first.
 
 #### C3 — WS token in query string
@@ -439,6 +460,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** accepted the install token via `?token=...` as well as the `Authorization` header — query strings land in logs and browser history.
 **Fix:** removed the `token` query param and its fallback branch entirely; header-only bearer auth. The dev bridge scripts that built `?token=` URLs were updated to use `additional_headers` instead.
+**Fix commit:** `80b8b29` — harden: WS channel auth via header only (C3)
 **Verified:** connecting with `?token=<valid>` and no `Authorization` header now closes with code 1008.
 
 #### C4 — Verbose upstream errors
@@ -450,6 +472,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** `str(e)` — raw upstream exception text and provider hostnames — went directly into `HTTPException` details returned to the caller.
 **Fix:** every site logs the full detail server-side (`logger.error(..., exc_info=True)`) and raises a generic client-facing message instead — the image-fetch failure, both provider-call failure sites, and the embed error paths (429/400/502/503).
+**Fix commit:** `d1c4808` — harden: generic client errors, detailed server-side logs (C4)
 **Verified:** a forced provider failure now returns `502 upstream provider error` with no provider name or exception text in the response body.
 
 #### C5 — No rate limits on the data plane
@@ -462,6 +485,7 @@ attacker-reachable once the gateway got a public URL.
 **Before:** zero references to `glc.security.rate_limits` in the data plane — the limiter was wired only into WS/webhook traffic.
 **Fix:** `check_data_plane_rate_limit()` wired into `chat()`/`embed()` (vision and batch dispatch through `chat()`, so covered transitively), `transcribe_route()`, `speak_route()`. `chat.py` also gained a hard daily spend cap via `GLC_DAILY_BUDGET_USD`.
 **Caveat:** A1's auth model issues one shared install token to every caller, so this is a **global** rate limit / budget cap on the whole gateway, not per-caller throttling.
+**Fix commit:** `d008d9b` — harden: rate limits + daily budget cap on the data plane (C5)
 **Verified:** the default `messages_per_minute` (30) worth of requests now returns `429` instead of routing to a provider; setting `GLC_DAILY_BUDGET_USD` below the day's logged spend also returns `429`.
 
 #### C6 — Pairing-code brute force
@@ -473,6 +497,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** no attempt counter or lockout — an install-token holder could try all 1,000,000 six-digit codes with zero friction.
 **Fix:** `PairingStore` tracks confirm failures in a sliding window (10 per 5 minutes); once hit, `confirm_code` raises `PairingLockedOut` and the route returns `429`. This is a global lockout, not per-identity.
+**Fix commit:** `04ce55a` — harden: pairing-code attempt limiter (C6)
 **Verified:** 10 wrong codes in a row return `404` each as before; the 11th attempt (correct or not) returns `429`.
 
 ### Bonus hardening: constant-time token comparisons
@@ -484,6 +509,7 @@ attacker-reachable once the gateway got a public URL.
 
 **Before:** both compared the install token with plain `!=`, inconsistent with the webhook verify-token check right next door in the same file, which already used `hmac.compare_digest` correctly.
 **Fix:** both call sites now use `hmac.compare_digest`.
+**Fix commit:** `d183a21` — harden: constant-time token comparisons (control.py, channels.py)
 **Verified:** behavior unchanged (right token passes, wrong token still rejected) — a non-functional timing fix, confirmed via source inspection that no `presented != expected`/`presented == expected` pattern remains.
 
 ### Known gaps (not fixed this round)
