@@ -37,12 +37,42 @@ class _PairingSetupBlocked(Exception):
     checks_http.py's C6), not a bug in C2/L9 itself."""
 
 
+def _is_already_paired_owner(target: Target, channel: str) -> bool:
+    """/v1/control/presence lists every currently-paired identity — if
+    the probe is already owner_paired on `channel` from an earlier run
+    of this same check, there's no reason to pair again. Best-effort:
+    any failure here just means "assume not paired yet" and fall
+    through to the normal pair/confirm flow, so a presence-check hiccup
+    never blocks the check outright."""
+    h = {"Authorization": f"Bearer {target.install_token}"}
+    try:
+        r = httpx.get(f"{target.base_url}/v1/control/presence", headers=h, timeout=10)
+        r.raise_for_status()
+    except httpx.HTTPError:
+        return False
+    return any(
+        p.get("channel") == channel
+        and p.get("channel_user_id") == _PROBE_USER_ID
+        and p.get("trust_level") == "owner_paired"
+        for p in r.json().get("paired_users", [])
+    )
+
+
 def _ensure_paired_owner(target: Target, channel: str) -> None:
     """The allowlist drops messages from unknown senders before the
     spoof-vulnerable code ever runs — that's a *different* control, not
     the one this check tests. Pair the probe identity as an owner on
     `channel` first so the envelope actually reaches channel_ws's
-    channel-vs-route comparison (or lack of it)."""
+    channel-vs-route comparison (or lack of it).
+
+    Skips the pair/confirm dance entirely once the probe is already
+    paired from an earlier run — pairings persist (they're written to
+    the real pairing store), so after the first successful run this
+    check never touches /v1/control/pair/confirm again, which also
+    means it stops being exposed to C6's pairing-confirm lockout on
+    every re-run after the first."""
+    if _is_already_paired_owner(target, channel):
+        return
     h = {"Authorization": f"Bearer {target.install_token}"}
     pair = httpx.post(
         f"{target.base_url}/v1/control/pair",
@@ -266,9 +296,12 @@ CHECKS: list[Check] = [
         _check_c2,
         "T1.6",
         notes="Same underlying bug as L9 in the ground-truth table. Uses webui/whatsapp (not "
-        "telegram/discord) because those are the channels enabled by default in channels.yaml. If this "
-        "reports error mentioning a pairing lockout, that's C6's global confirm-attempt limiter still "
-        "active from a recent run of C6 — not a bug here; wait ~5 minutes and re-run.",
+        "telegram/discord) because those are the channels enabled by default in channels.yaml. Only "
+        "pairs the probe identity once — checks /v1/control/presence first and skips pair/confirm "
+        "entirely on every re-run after the first, so this stops being exposed to C6's global "
+        "confirm-attempt lockout after the first successful run. If it still reports error mentioning "
+        "a pairing lockout, that means the very first pair attempt landed in an active C6 lockout — "
+        "wait ~5 minutes and re-run once; every run after that is immune.",
         attacker_role="AR3",
         command=_C2_COMMAND,
         fix_summary=(

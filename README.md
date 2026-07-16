@@ -416,21 +416,21 @@ against a live gateway):
 - C5 fires up to 35 rapid requests and C6 up to 20 — against your real
   deployed gateway, since that's the only target this console has. Expect
   this to briefly drive real (if tiny) usage.
-- **Checks can trip each other's global rate limits/lockouts in a single
-  `Run all checks` pass — the console now says so plainly instead of
-  showing a bare exception.** C5's data-plane limiter and C6's
-  pairing-confirm lockout are both global (see their own caveats above),
-  not per-check — so if C6 runs first and exhausts the confirm-attempt
-  lockout, C2/L9's own setup step (which pairs a probe identity via
-  `/v1/control/pair/confirm`) hits a *legitimate* `429` from C6's own fix
-  working correctly. C2/L9's check now detects this specific 429 and
-  reports `error` with a summary naming C6 and the 5-minute window
-  directly, instead of a generic connection-error-looking message. This
-  isn't a bug in either fix, and scoping C6's lockout per-identity to
-  avoid the collision would be the wrong trade — that would let a real
-  attacker just rotate identities to reset their own lockout. Re-run C2/L9
-  by itself once the window has passed, or run it before C6 in a fresh
-  pass.
+- **C5's and C6's rate limits/lockouts are global, not per-check, and can
+  affect C2/L9's own setup step (its first run only, now).** C2/L9 pairs
+  a probe identity via `/v1/control/pair`/`/pair/confirm` before it can
+  test anything — and glc/security/pairing.py's confirm-attempt lockout
+  is a single global counter, deliberately not scoped per identity
+  (scoping it would let a real attacker just rotate identities to reset
+  their own lockout). If C6 (20 wrong codes) tripped that lockout right
+  before C2/L9's *first-ever* pairing attempt, that attempt hits a
+  legitimate `429`. The console now guards against this two ways: it
+  checks `/v1/control/presence` first and skips pairing entirely once
+  the probe is already paired from an earlier run — so this can only
+  ever happen on the very first run, never on repeats — and if it does
+  happen, reports a clear `error` naming C6 and the 5-minute window
+  instead of a bare exception. Re-run C2/L9 once after the window
+  passes; every run after that is immune.
 
 Stop the console with **Ctrl+C** — a force-kill just leaves port 8811
 bound until the next startup's port-guard clears it.
